@@ -29,7 +29,8 @@ same change. Keep its install commands and its status section true to the code.
 Layout: `src/main.rs` wires the dispatch, `config.rs` reads TOML, `paths.rs`
 maps client to worker roots, `transport.rs` picks SSH or the agent per host,
 `agent.rs` is the agent protocol and daemon, `state.rs` is the WAL and its
-flusher, `scheduler.rs` places jobs, `janitor.rs` repairs state.
+flusher, `stats.rs` reads the journal back, `scheduler.rs` places jobs,
+`janitor.rs` repairs state.
 `config.example.toml` is the production pair.
 
 ## This repository is public

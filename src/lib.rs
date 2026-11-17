@@ -7,6 +7,7 @@ pub mod locks;
 pub mod paths;
 pub mod scheduler;
 pub mod state;
+pub mod stats;
 pub mod transport;
 
 pub use config::{Config, Host, PathMap, Program};

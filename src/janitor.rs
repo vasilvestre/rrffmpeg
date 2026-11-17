@@ -263,6 +263,7 @@ mod tests {
         journal.append(Event::Started {
             job: job.to_string(),
             host: host_name.to_string(),
+            elapsed_us: 0,
         });
         journal
             .active_jobs()

@@ -29,6 +29,9 @@ fn main() {
 }
 
 fn run() -> Result<i32> {
+    // Monotonic, so the dispatch figure in the journal cannot be distorted by
+    // a clock step. Wall clock lives in the journal records themselves.
+    let start = std::time::Instant::now();
     let mut argv = std::env::args_os();
     let argv0 = argv.next().unwrap_or_default();
     let args: Vec<OsString> = argv.collect();
@@ -99,6 +102,7 @@ fn run() -> Result<i32> {
     journal.append(Event::Started {
         job: job.id.clone(),
         host: lease.host.name.clone(),
+        elapsed_us: start.elapsed().as_micros() as u64,
     });
 
     let code = match transport.run(&lease.host, &mapped, stderr_as_stdout) {

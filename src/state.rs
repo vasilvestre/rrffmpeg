@@ -7,10 +7,11 @@
 //! On disk each event is one JSON object per line:
 //!
 //! ```text
-//! {"seq":1,"ts":1763300000123,"ev":{"kind":"started","job":"42-7","host":"worker"}}
+//! {"seq":1,"ts":1763300000123456,"ev":{"kind":"started","job":"42-7","host":"worker","elapsed_us":412}}
 //! ```
 //!
-//! `seq` orders the events and `ts` is wall-clock milliseconds. A truncated
+//! `seq` orders the events and `ts` is wall-clock microseconds, because the
+//! dispatcher has to be measured at a finer grain than a millisecond. A truncated
 //! last line fails to parse and is skipped, so a crash mid-write costs at most
 //! the event being written.
 
@@ -41,6 +42,10 @@ pub enum Event {
     Started {
         job: String,
         host: String,
+        /// Microseconds from process start to this append, on a monotonic
+        /// clock. It is the dispatcher's own share of the start: config, the
+        /// journal replay, the slot file. The transport comes after.
+        elapsed_us: u64,
     },
     Finished {
         job: String,
@@ -60,10 +65,10 @@ pub enum Event {
 
 /// One line of the journal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Record {
-    seq: u64,
-    ts: u64,
-    ev: Event,
+pub struct Record {
+    pub seq: u64,
+    pub ts: u64,
+    pub ev: Event,
 }
 
 enum Command {
@@ -156,7 +161,7 @@ impl Journal {
             apply(&event, &mut live);
             Record {
                 seq: live.seq,
-                ts: now_millis(),
+                ts: now_micros(),
                 ev: event,
             }
         };
@@ -208,16 +213,16 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn now_millis() -> u64 {
+fn now_micros() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
+        .map(|d| d.as_micros() as u64)
         .unwrap_or(0)
 }
 
 fn apply(event: &Event, live: &mut Live) {
     match event {
-        Event::Started { job, host } => {
+        Event::Started { job, host, .. } => {
             if let Some(old) = live.jobs.insert(job.clone(), host.clone()) {
                 dec(&mut live.counts, &old);
             }
@@ -244,6 +249,32 @@ fn dec(counts: &mut HashMap<String, usize>, host: &str) {
             counts.remove(host);
         }
     }
+}
+
+/// Every record on disk, oldest first, one entry per `seq`. Rotation writes
+/// `journal.N` beside the active `journal`, and a crash can repeat a sequence
+/// number, so the map wins twice.
+pub fn records(dir: &Path) -> Result<Vec<Record>> {
+    let mut files = vec![dir.join(JOURNAL_NAME)];
+    files.extend(rotated_files(dir)?.into_iter().map(|(_, path)| path));
+    let mut by_seq: std::collections::BTreeMap<u64, Record> = std::collections::BTreeMap::new();
+    for path in files {
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(Error::Io(e, format!("open {}", path.display()))),
+        };
+        for line in BufReader::new(file).lines() {
+            let line = line.map_err(|e| Error::Io(e, format!("read {}", path.display())))?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(record) = serde_json::from_str::<Record>(&line) {
+                by_seq.insert(record.seq, record);
+            }
+        }
+    }
+    Ok(by_seq.into_values().collect())
 }
 
 fn rotated_files(dir: &Path) -> Result<Vec<(u64, PathBuf)>> {
@@ -472,6 +503,7 @@ mod tests {
         Event::Started {
             job: job.into(),
             host: host.into(),
+            elapsed_us: 0,
         }
     }
 

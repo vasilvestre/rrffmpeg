@@ -32,6 +32,7 @@ jobs:
           mkdir -p "$name"
           cp "target/${{ matrix.target }}/release/rrffmpeg" "$name/"
           cp "target/${{ matrix.target }}/release/rrffmpeg-agent" "$name/"
+          cp "target/${{ matrix.target }}/release/rrffmpeg-stats" "$name/"
           cp README.md config.example.toml "$name/"
           tar czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
