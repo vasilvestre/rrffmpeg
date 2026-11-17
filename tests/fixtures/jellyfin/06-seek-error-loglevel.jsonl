@@ -1,1 +1,0 @@
-{"program":"ffmpeg","argv":["-loglevel","error","-ss","412.480","-i","file:@SRC@","-t","600","-map","0:v:0","-map","0:a:0","-c:v:0","h264_vaapi","-b:v:0","2000000","-c:a:0","aac","-ac:a:0","2","-f","mpegts","/dev/shm/jellyfin-transcode/seek-2b3a/seek.ts"],"cwd":"/home/alice","label":"seek-transcode","stderr_as_stdout":false,"exit_code":0}

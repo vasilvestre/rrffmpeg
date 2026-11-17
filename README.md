@@ -224,16 +224,19 @@ client_weight = 400   # 1 to 1000, same scale as the kernel's IO weight
 
 - Capability-aware placement that reads more than encoder flags.
 - Multi-worker balancing.
-- A replay harness that records real Jellyfin invocations and replays them, so
-  "stability" can be measured instead of felt.
+- A recording of trickplay extraction and of a failing probe. The other job
+  classes are already replayed from real invocations.
 
 ## Risks
 
 - **The Jellyfin contract is the hard part.** Argument passthrough, stream
   wiring, special flags, exit codes, ffprobe vs ffmpeg, the `EncoderPath`
   rewrite. This is weeks of testing, not the event loop.
-- **Measuring stability needs a harness.** Without recorded-and-replayed real
-  invocations, regressions are invisible until someone watches a film.
+- **Measuring stability needs a harness, and the harness has a blind spot.** The
+  replay test compares argv, exit codes and stream wiring against recorded real
+  invocations, so a passthrough regression fails before a viewer sees it. It
+  cannot see a wrong filter chain, a GPU failure or a dispatch bug: the stand-in
+  never encodes. Use `tests/real_ffmpeg.rs` and the production pair for those.
 - **Do not reinvent the job model.** dffmpeg already solved coordinator +
   worker + heartbeat + requeue. Borrow the model; spend the effort on the
   Rust implementation and the passthrough fidelity.
