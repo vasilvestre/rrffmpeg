@@ -90,7 +90,8 @@ Single Rust binary, used as Jellyfin's `ffmpeg` replacement.
   per-job SSH probe and makes retry/requeue natural. SSH stays as a
   zero-install fallback.
 - **Path mapping.** Logical variables (as in dffmpeg) so client and worker can
-  mount media at different roots.
+  mount media at different roots. The host probe stats every mapped root, so a
+  dropped or hung mount marks the worker down instead of failing each job.
 
 ## MVP scope (v1)
 

@@ -16,6 +16,8 @@ concurrency = 2
 capabilities = ["vaapi"]
 
 # Input: media mounted at a different root on the worker.
+# The probe checks every `to` root, so a dead mount marks the host down
+# instead of failing each job with ENOENT.
 [[hosts.paths]]
 from = "/home/alice"
 to = "/home/bob/media"

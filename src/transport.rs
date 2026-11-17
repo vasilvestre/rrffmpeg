@@ -16,7 +16,8 @@ pub trait Transport: Send + Sync {
     /// Returns the exit code the remote ffmpeg produced.
     fn run(&self, host: &Host, job: &Job, stderr_as_stdout: bool) -> Result<i32>;
 
-    /// Cheap liveness check. Must not be called once per job.
+    /// Cheap liveness check: the host answers, and every mapped root is
+    /// readable. A dead mount fails here, so it must not be called once per job.
     fn probe(&self, host: &Host) -> bool;
 
     /// Is the remote process for `job_id` still running?
@@ -87,6 +88,30 @@ pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// What the probe runs on the worker. Without path mapping the host only has
+/// to answer. With mapping, every mapped root must stat within 5 s, so a
+/// dropped FUSE mount marks the host down instead of failing each job with
+/// ENOENT, and a hung mount cannot stall the janitor cycle.
+///
+/// shortcut: only the root itself is checked, so an empty directory left by a
+/// mount that never came up still passes. Add a per-host sentinel path when
+/// that bites.
+fn probe_command(host: &Host) -> String {
+    if host.paths.is_empty() {
+        return "true".into();
+    }
+    host.paths
+        .iter()
+        .map(|p| {
+            format!(
+                "timeout 5 ls -d {} >/dev/null",
+                shell_quote(&p.to.to_string_lossy())
+            )
+        })
+        .collect::<Vec<String>>()
+        .join(" && ")
+}
+
 impl Transport for Ssh {
     fn run(&self, host: &Host, job: &Job, stderr_as_stdout: bool) -> Result<i32> {
         let remote = self.remote_command(job, host, stderr_as_stdout)?;
@@ -127,7 +152,7 @@ impl Transport for Ssh {
             .arg(format!("ConnectTimeout={}", self.connect_timeout()))
             .arg("--")
             .arg(&host.name)
-            .arg("true")
+            .arg(probe_command(host))
             .output()
             .map(|out| out.status.success())
             .unwrap_or(false)
@@ -155,7 +180,7 @@ impl Transport for Ssh {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Program;
+    use crate::config::{PathMap, Program};
     use std::ffi::OsString;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
@@ -394,6 +419,48 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         let s = ssh(fake_exec_ssh(&dir, &argv, &bin), &dir);
         assert!(s.probe(&host()));
+    }
+
+    #[test]
+    fn the_probe_checks_every_mapped_root() {
+        let dir = fixture("probe-paths");
+        let argv = dir.join("argv");
+        let s = ssh(fake_exit_ssh(&dir, &argv, 0), &dir);
+        let mut h = host();
+        h.paths = vec![
+            PathMap {
+                from: "/home/alice".into(),
+                to: "/home/bob/media".into(),
+            },
+            PathMap {
+                from: "/dev/shm/jellyfin-transcode".into(),
+                to: "/home/bob/transcode".into(),
+            },
+        ];
+
+        assert!(s.probe(&h));
+        let v = recorded(&argv);
+        assert_eq!(
+            v[6],
+            "timeout 5 ls -d '/home/bob/media' >/dev/null && \
+             timeout 5 ls -d '/home/bob/transcode' >/dev/null"
+        );
+    }
+
+    #[test]
+    fn a_missing_mapped_root_marks_the_host_down() {
+        let dir = fixture("probe-no-root");
+        let argv = dir.join("argv");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let s = ssh(fake_exec_ssh(&dir, &argv, &bin), &dir);
+        let mut h = host();
+        h.paths = vec![PathMap {
+            from: "/home/alice".into(),
+            to: dir.join("unmounted").to_str().expect("utf-8 path").into(),
+        }];
+
+        assert!(!s.probe(&h));
     }
 
     #[test]
