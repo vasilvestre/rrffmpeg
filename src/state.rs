@@ -45,6 +45,10 @@ pub enum Event {
         /// Microseconds from process start to this append, on a monotonic
         /// clock. It is the dispatcher's own share of the start: config, the
         /// journal replay, the slot file. The transport comes after.
+        ///
+        /// Defaulted: journals written before this field existed must keep
+        /// replaying, and their dispatch time was never measured.
+        #[serde(default)]
         elapsed_us: u64,
     },
     Finished {
@@ -653,6 +657,18 @@ mod tests {
         journal.append(started("c", "worker"));
         journal.flush().unwrap();
         assert_eq!(journal.active_on("worker"), 2);
+    }
+
+    /// A journal written before `elapsed_us` existed keeps replaying, without
+    /// a warning per line at every start.
+    #[test]
+    fn a_record_without_elapsed_us_still_counts() {
+        let dir = temp_dir("legacy");
+        let legacy = "{\"seq\":1,\"ts\":0,\"ev\":{\"kind\":\"started\",\"job\":\"a\",\"host\":\"worker\"}}\n";
+        std::fs::write(dir.join(JOURNAL_NAME), legacy).unwrap();
+
+        let journal = Journal::open(&dir).unwrap();
+        assert_eq!(journal.active_on("worker"), 1);
     }
 
     #[test]
