@@ -172,6 +172,39 @@ the daemon; it travels inside TLS, but a stolen token still works from any host
 that can reach the address. Keep the listener on a private network until mTLS
 exists.
 
+## Choosing a mode and a transport
+
+Pick by where the dispatcher runs, not by preference. The cost of SSH is one
+process and one key exchange per job. The agent removes that cost and adds a
+daemon on the worker.
+
+| Where the dispatcher runs | Configuration | Reason |
+|---|---|---|
+| The box has the GPU | no `[[hosts]]` | Local mode: no state, no thread, no disk |
+| Client without a GPU, LAN, a few jobs per hour | SSH | Nothing to install, and the cost is invisible at that rate |
+| Client that sends bursts of short calls | Agent | Every Jellyfin startup probe is one SSH handshake otherwise |
+| Link with high latency or loss | Agent | One round trip for TLS 1.3, against several for SSH key exchange and auth |
+| Worker with no inbound reachability | SSH | The agent needs a listening port on the worker |
+| Worker that cannot keep a daemon running | SSH | Nothing to supervise on the worker |
+| Worker that must not run arbitrary argv | SSH | An agent token is remote code execution by design |
+| Any client on a slow or contended disk | SSH or agent, `state_dir` on tmpfs | Every invocation replays the journal before it dispatches |
+
+Rules that apply once a worker is configured:
+
+1. Put `state_dir` on tmpfs when the disk is slow. Each job is a new process,
+   so each dispatch reads the journal back. `Evidence` below gives the measure.
+2. Never let a client without a GPU quietly transcode. After `queue_wait_secs`
+   without a worker slot the process runs the local binary, and there is no
+   switch to turn that off. Raise `queue_wait_secs`, and watch the log for
+   `rrffmpeg: no worker slot after`. On a shared box the fallback runs ffmpeg
+   at the lowest priority, on the wrong hardware, and can trip a memory cap.
+3. Capability matching only reads encoder flags. A `-version` or `-encoders`
+   probe carries no capability, so with several workers it may land on one
+   that cannot encode. With a single worker it does not matter.
+4. Measure before you add the agent. Time `ffprobe -version` through the
+   dispatcher a few hundred times. If p99 is under 50 ms, SSH is enough and
+   the daemon is complexity you do not need yet.
+
 ## Later
 
 - Priority and capability-aware placement.
@@ -189,6 +222,13 @@ exists.
 - **Do not reinvent the job model.** dffmpeg already solved coordinator +
   worker + heartbeat + requeue. Borrow the model; spend the effort on the
   Rust implementation and the passthrough fidelity.
+- **The journal rotates at 8 MiB but nothing prunes it.** That is fine on a
+  disk and unbounded on tmpfs, which is exactly where a slow disk pushes you.
+  Watch the directory size, or add a retention rule before the client lives on
+  tmpfs for months.
+- **A full queue falls back to local execution.** The fallback always runs,
+  with no config switch, so a GPU-less client can end up transcoding on the
+  wrong hardware. See `Choosing a mode and a transport`.
 
 ## Evidence
 

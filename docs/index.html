@@ -190,7 +190,7 @@ below.</p>
   <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
   <tbody>
     <tr><td><code>hosts</code></td><td><code>[]</code></td><td>Workers. Empty means every job runs locally.</td></tr>
-    <tr><td><code>state_dir</code></td><td><code>~/.local/state/rrffmpeg</code></td><td>Journal, pid files and the coordinator slot files. Put it on a local filesystem; a slow disk adds fsync latency, it must not be shared over NFS.</td></tr>
+    <tr><td><code>state_dir</code></td><td><code>~/.local/state/rrffmpeg</code></td><td>Journal, pid files and the coordinator slot files. Put it on a local filesystem; a slow disk adds latency to the journal replay each dispatch does, and a network mount breaks the slot cap silently.</td></tr>
     <tr><td><code>queue_wait_secs</code></td><td><code>600</code></td><td>How long a job waits for a free worker slot before running locally.</td></tr>
     <tr><td><code>down_ttl_secs</code></td><td><code>60</code></td><td>How long one process's "host down" verdict is trusted by the others. Expiry is the repair mechanism.</td></tr>
     <tr><td><code>stderr_as_stdout</code></td><td><code>false</code></td><td>Copy ffmpeg stderr to stdout, for Jellyfin builds that read probe output there.</td></tr>
@@ -216,6 +216,29 @@ below.</p>
     <tr><td><code>paths</code></td><td><code>[]</code></td><td>Path maps, see below.</td></tr>
   </tbody>
 </table>
+
+<h3>Choosing a transport</h3>
+
+<p>SSH costs one process and one key exchange per job, and needs nothing on the
+worker. Pick it when the worker cannot accept an inbound connection, cannot
+keep a daemon running, or must not run arbitrary argv. Pick the agent when the
+client sends bursts of short calls (Jellyfin startup probes, seeks, ffprobe),
+when the link has real latency, or when a killed client must not leave a
+transcode running on the worker. Measure first: time
+<code>ffprobe -version</code> through the dispatcher. Under 50 ms at p99, SSH
+is enough.</p>
+
+<p>Measured on one loopback box with ffmpeg 8.0.1: a full dispatch at p99 is
+32.95 ms, of which ffmpeg is 27.8 ms, the dispatcher 3.8 ms and the TLS
+transport 0.4 ms. A journal of 3000 records adds 1.3 ms to every dispatch, so
+keep <code>state_dir</code> on a fast filesystem. The harness and the raw runs
+live in <code>docs/latency.md</code>.</p>
+
+<p>Put <code>state_dir</code> on tmpfs when the disk is slow, because every
+invocation replays the journal before it dispatches. After
+<code>queue_wait_secs</code> without a free slot the job runs locally, and no
+switch prevents it, so a client without a GPU needs a generous value and a
+watch on the <code>no worker slot</code> log line.</p>
 
 <h3>Path maps</h3>
 
