@@ -25,6 +25,12 @@ fn default_queue_wait() -> u64 {
     600
 }
 
+/// How long one process's "host down" verdict is trusted by the others.
+/// Expiry is the whole repair mechanism: no daemon clears the flag.
+fn default_down_ttl() -> u64 {
+    60
+}
+
 fn default_ssh() -> PathBuf {
     PathBuf::from("ssh")
 }
@@ -77,6 +83,9 @@ pub struct Host {
     pub ffmpeg_bin: Option<String>,
     #[serde(default)]
     pub ffprobe_bin: Option<String>,
+    /// `host:port` of the agent daemon. Set it to skip ssh for this host.
+    #[serde(default)]
+    pub agent_addr: Option<String>,
     #[serde(default)]
     pub paths: Vec<PathMap>,
 }
@@ -92,6 +101,9 @@ pub struct Config {
     pub state_dir: PathBuf,
     #[serde(default = "default_ssh")]
     pub ssh_bin: PathBuf,
+    /// Shared secret of the agent daemon. `RRFFMPEG_AGENT_TOKEN` wins.
+    #[serde(default)]
+    pub agent_token: Option<String>,
     #[serde(default = "default_ffmpeg")]
     pub local_ffmpeg: PathBuf,
     #[serde(default = "default_ffprobe")]
@@ -100,6 +112,10 @@ pub struct Config {
     /// long wait beats running a transcode on a host with no GPU.
     #[serde(default = "default_queue_wait")]
     pub queue_wait_secs: u64,
+    /// How long one process's "host down" verdict is trusted by the others.
+    /// Expiry is the whole repair mechanism: no daemon clears the flag.
+    #[serde(default = "default_down_ttl")]
+    pub down_ttl_secs: u64,
 }
 
 impl Default for Config {
@@ -109,9 +125,11 @@ impl Default for Config {
             stderr_as_stdout: false,
             state_dir: default_state_dir(),
             ssh_bin: default_ssh(),
+            agent_token: None,
             local_ffmpeg: default_ffmpeg(),
             local_ffprobe: default_ffprobe(),
             queue_wait_secs: default_queue_wait(),
+            down_ttl_secs: default_down_ttl(),
         }
     }
 }

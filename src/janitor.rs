@@ -172,9 +172,10 @@ fn wait(stop: &AtomicBool, wake: &(Mutex<()>, Condvar), total: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::locks::LockDir;
     use crate::state::Event;
     use crate::{Error, Job, Result};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::AtomicUsize;
     use std::time::Instant;
 
@@ -224,6 +225,7 @@ mod tests {
             capabilities: Vec::new(),
             ffmpeg_bin: None,
             ffprobe_bin: None,
+            agent_addr: None,
             paths: Vec::new(),
         }
     }
@@ -234,6 +236,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    /// A scheduler wired to the test's own state dir, so runs stay isolated.
+    fn scheduler(dir: &Path) -> Arc<Scheduler> {
+        Arc::new(Scheduler::new(
+            vec![host("worker")],
+            Arc::new(LockDir::new(dir)),
+            Duration::from_secs(60),
+        ))
     }
 
     /// Poll until `cond` holds or the deadline passes. Never sleeps blindly.
@@ -267,7 +278,7 @@ mod tests {
             start(&journal, "j1", "worker"),
             "the journal does not report the Started job as active"
         );
-        let scheduler = Arc::new(Scheduler::new(vec![host("worker")]));
+        let scheduler = scheduler(&dir);
         let transport = Arc::new(FakeTransport::new(true, false));
 
         let janitor = Janitor::spawn(
@@ -296,7 +307,7 @@ mod tests {
             start(&journal, "j1", "worker"),
             "the journal does not report the Started job as active"
         );
-        let scheduler = Arc::new(Scheduler::new(vec![host("worker")]));
+        let scheduler = scheduler(&dir);
         let transport = Arc::new(FakeTransport::new(true, true));
 
         let janitor = Janitor::spawn(
@@ -325,7 +336,7 @@ mod tests {
     fn a_down_host_that_probes_true_is_marked_up() {
         let dir = tempdir("host-up");
         let journal = Arc::new(Journal::open(&dir).expect("journal"));
-        let scheduler = Arc::new(Scheduler::new(vec![host("worker")]));
+        let scheduler = scheduler(&dir);
         scheduler.mark_down("worker");
         let transport = Arc::new(FakeTransport::new(true, true));
 
@@ -349,7 +360,7 @@ mod tests {
     fn a_live_host_whose_probe_fails_is_marked_down() {
         let dir = tempdir("host-down");
         let journal = Arc::new(Journal::open(&dir).expect("journal"));
-        let scheduler = Arc::new(Scheduler::new(vec![host("worker")]));
+        let scheduler = scheduler(&dir);
         let transport = Arc::new(FakeTransport::new(false, true));
 
         let janitor = Janitor::spawn(
@@ -363,16 +374,16 @@ mod tests {
             transport.probes.load(Ordering::SeqCst) >= 1 && scheduler.is_down("worker")
         });
         janitor.stop();
-        let _ = std::fs::remove_dir_all(&dir);
         assert!(ok, "the failing host was never marked down");
         assert!(scheduler.is_down("worker"), "the host is still marked up");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn stop_returns_promptly_with_a_long_interval() {
         let dir = tempdir("stop");
         let journal = Arc::new(Journal::open(&dir).expect("journal"));
-        let scheduler = Arc::new(Scheduler::new(vec![host("worker")]));
+        let scheduler = scheduler(&dir);
         let transport = Arc::new(FakeTransport::new(true, true));
 
         let janitor = Janitor::spawn(scheduler, journal, transport, Duration::from_secs(3600));

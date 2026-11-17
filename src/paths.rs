@@ -105,6 +105,7 @@ mod tests {
             capabilities: vec![],
             ffmpeg_bin: None,
             ffprobe_bin: None,
+            agent_addr: None,
             paths: paths
                 .into_iter()
                 .map(|(from, to)| PathMap {

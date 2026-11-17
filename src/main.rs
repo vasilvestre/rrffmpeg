@@ -6,9 +6,10 @@
 //! signals pass through untouched.
 
 use rrffmpeg::janitor::Janitor;
+use rrffmpeg::locks::LockDir;
 use rrffmpeg::scheduler::Scheduler;
 use rrffmpeg::state::{Event, Journal};
-use rrffmpeg::transport::{Ssh, Transport};
+use rrffmpeg::transport::{Router, Ssh, Transport};
 use rrffmpeg::{Error, Job, Program, Result, config::Config, paths};
 use std::ffi::OsString;
 use std::os::unix::process::CommandExt;
@@ -34,6 +35,12 @@ fn run() -> Result<i32> {
 
     let program = program_for(&argv0, &args);
     let config = Config::load()?;
+    let agent = agent_token(&config);
+    if agent.is_none() && config.hosts.iter().any(|h| h.agent_addr.is_some()) {
+        return Err(Error::Config(
+            "a host sets agent_addr but no token is configured: set agent_token or RRFFMPEG_AGENT_TOKEN".into(),
+        ));
+    }
     let stderr_as_stdout =
         config.stderr_as_stdout || std::env::var_os("RRFFMPEG_STDERR_AS_STDOUT").is_some();
 
@@ -43,8 +50,15 @@ fn run() -> Result<i32> {
     }
 
     let journal = Arc::new(Journal::open(&config.state_dir)?);
-    let scheduler = Arc::new(Scheduler::new(config.hosts.clone()));
-    let transport: Arc<dyn Transport> = Arc::new(Ssh::new(config.ssh_bin.clone()));
+    let scheduler = Arc::new(Scheduler::new(
+        config.hosts.clone(),
+        Arc::new(LockDir::new(&config.state_dir)),
+        Duration::from_secs(config.down_ttl_secs),
+    ));
+    let transport: Arc<dyn Transport> = Arc::new(Router {
+        ssh: Ssh::new(config.ssh_bin.clone()),
+        agent,
+    });
     let _janitor = Janitor::spawn(
         scheduler.clone(),
         journal.clone(),
@@ -94,7 +108,7 @@ fn run() -> Result<i32> {
                 host: lease.host.name.clone(),
             });
             scheduler.mark_down(&lease.host.name);
-            scheduler.release(lease);
+            drop(lease);
             return Err(e);
         }
     };
@@ -103,7 +117,8 @@ fn run() -> Result<i32> {
         job: job.id.clone(),
         code,
     });
-    scheduler.release(lease);
+    // Free the slot before returning so the next job can start at once.
+    drop(lease);
     Ok(code)
 }
 
@@ -122,6 +137,16 @@ fn run_local(
         .unwrap_or_else(|| config.local_binary(program).clone());
     let err = Command::new(&bin).args(args).exec();
     Err(Error::Io(err, format!("cannot run {}", bin.display())))
+}
+
+/// The environment wins over the file so a secret can stay out of a config
+/// file that other users can read.
+fn agent_token(config: &Config) -> Option<rrffmpeg::agent::Agent> {
+    std::env::var("RRFFMPEG_AGENT_TOKEN")
+        .ok()
+        .or_else(|| config.agent_token.clone())
+        .filter(|t| !t.is_empty())
+        .map(rrffmpeg::agent::Agent::new)
 }
 
 /// The encoder in the arguments tells us which worker can run the job.

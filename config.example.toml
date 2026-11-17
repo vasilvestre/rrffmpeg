@@ -6,14 +6,27 @@
 # Jellyfin on some builds reads probe output on stdout.
 stderr_as_stdout = false
 
-# Journal and pid files. Put it on tmpfs if the disk is slow, the journal is
-# append-only and survives a reboot only for the janitor's benefit.
+# Shared secret of the agent daemon. Set it only if a host uses agent_addr.
+# RRFFMPEG_AGENT_TOKEN overrides it, which keeps the secret out of this file.
+# agent_token = "change-me"
+
+# Journal, pid files and the `coord` slot files. Put it on tmpfs if the disk is
+# slow, the journal is append-only and survives a reboot only for the janitor's
+# benefit.
 state_dir = "/home/alice/.local/state/rrffmpeg"
+
+# How long one process's "host down" verdict is trusted by the others.
+# state_dir must be on a local filesystem, or the slot cap silently falls open.
+down_ttl_secs = 60
 
 [[hosts]]
 name = "worker"
 concurrency = 2
 capabilities = ["vaapi"]
+
+# Skip ssh for this host and talk to `rrffmpeg-agent` instead. Hosts without
+# this line keep using ssh, which needs nothing installed on the worker.
+# agent_addr = "worker:9876"
 
 # Input: media mounted at a different root on the worker.
 # The probe checks every `to` root, so a dead mount marks the host down

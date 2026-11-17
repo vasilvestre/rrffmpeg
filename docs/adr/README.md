@@ -15,7 +15,9 @@ ADR-NNNN` and add the new record.
 | [0003](0003-in-process-janitor.md) | Repair in process, not with a cron watchdog | Accepted |
 | [0004](0004-prefix-path-mapping.md) | Longest-prefix path mapping in both directions | Accepted |
 | [0005](0005-ssh-transport.md) | SSH is the v1 transport, behind a trait | Accepted |
-| [0006](0006-placement-caps-and-wait.md) | Per-host concurrency plus capability match, wait then local | Accepted |
+| [0006](0006-placement-caps-and-wait.md) | Per-host concurrency plus capability match, wait then local | Superseded by [0008](0008-cross-process-slots.md) |
 | [0007](0007-pid-file-liveness.md) | Per-job pid file for liveness | Accepted |
+| [0008](0008-cross-process-slots.md) | Cross-process slot files and an expiring down verdict | Accepted |
+| [0009](0009-agent-transport.md) | An agent transport, one TCP connection per job | Accepted |
 
 All records dated 2026-11-17.

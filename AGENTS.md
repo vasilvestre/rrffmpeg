@@ -17,9 +17,17 @@ cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
 
+A `v*` tag runs `.github/workflows/release.yml`, which publishes static
+`x86_64` and `aarch64` binaries on the releases page. The install steps live
+in `README.md`.
+
+The public page is `docs/index.html`, served by GitHub Pages from the `/docs`
+folder of `main`. Keep it true to the code: config keys, features and status.
+
 Layout: `src/main.rs` wires the dispatch, `config.rs` reads TOML, `paths.rs`
-maps client to worker roots, `transport.rs` speaks SSH, `state.rs` is the WAL
-and its flusher, `scheduler.rs` places jobs, `janitor.rs` repairs state.
+maps client to worker roots, `transport.rs` picks SSH or the agent per host,
+`agent.rs` is the agent protocol and daemon, `state.rs` is the WAL and its
+flusher, `scheduler.rs` places jobs, `janitor.rs` repairs state.
 `config.example.toml` is the production pair.
 
 ## This repository is public

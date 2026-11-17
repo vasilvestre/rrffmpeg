@@ -1,6 +1,6 @@
 # 0006: Per-host concurrency plus capability match, then wait, then local
 
-Status: Accepted
+Status: Superseded by ADR-0008
 Date: 2026-11-17
 
 ## Context

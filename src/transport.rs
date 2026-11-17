@@ -177,6 +177,49 @@ impl Transport for Ssh {
     }
 }
 
+/// Picks a transport per host: `agent_addr` means the daemon, else ssh.
+pub struct Router {
+    pub ssh: Ssh,
+    pub agent: Option<crate::agent::Agent>,
+}
+
+impl Router {
+    fn agent(&self, host: &Host) -> Result<&crate::agent::Agent> {
+        self.agent.as_ref().ok_or_else(|| {
+            Error::Config(format!(
+                "host {} uses agent_addr but no agent_token is set",
+                host.name
+            ))
+        })
+    }
+}
+
+impl Transport for Router {
+    fn run(&self, host: &Host, job: &Job, stderr_as_stdout: bool) -> Result<i32> {
+        match host.agent_addr {
+            Some(_) => self.agent(host)?.run(host, job, stderr_as_stdout),
+            None => self.ssh.run(host, job, stderr_as_stdout),
+        }
+    }
+
+    fn probe(&self, host: &Host) -> bool {
+        match host.agent_addr {
+            Some(_) => self.agent(host).map(|a| a.probe(host)).unwrap_or(false),
+            None => self.ssh.probe(host),
+        }
+    }
+
+    fn job_alive(&self, host: &Host, job_id: &str) -> bool {
+        match host.agent_addr {
+            Some(_) => self
+                .agent(host)
+                .map(|a| a.job_alive(host, job_id))
+                .unwrap_or(false),
+            None => self.ssh.job_alive(host, job_id),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +285,7 @@ mod tests {
             capabilities: vec![],
             ffmpeg_bin: None,
             ffprobe_bin: None,
+            agent_addr: None,
             paths: vec![],
         }
     }

@@ -1,7 +1,9 @@
 //! Dispatch core shared by the binary and the tests.
 
+pub mod agent;
 pub mod config;
 pub mod janitor;
+pub mod locks;
 pub mod paths;
 pub mod scheduler;
 pub mod state;
