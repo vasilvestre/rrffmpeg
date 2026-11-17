@@ -32,8 +32,11 @@ slot files, with no daemon.
 
 - A job that fails its first slot attempt publishes one ticket per eligible
   host: `coord/<host>/queue/<nanos>-<pid>.want`, holding
-  `class weight seq client`. It refreshes the ticket's mtime on every poll and
-  removes it when it exits, by any path, because the file is owned by a guard.
+  `class weight seq client`. It refreshes the ticket's mtime on every poll,
+  including while every eligible host is full, and removes the ticket when it
+  exits, by any path, because the file is owned by a guard. Refreshing only
+  against a host with a free slot drops the ticket as dead while a long job
+  holds that slot: a transcode holds a slot far longer than 3 s.
 - Before taking a free slot, a waiter lists the directory and takes the slot
   only when no other live ticket ranks before its own. Nothing enforces the
   order: each waiter declines on its own. A killed process needs no repair,

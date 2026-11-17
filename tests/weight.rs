@@ -26,6 +26,70 @@ fn worker() -> Host {
     }
 }
 
+/// Age of the single waiting ticket, or `None` when none exists.
+fn ticket_age(dir: &std::path::Path) -> Option<Duration> {
+    let host = std::fs::read_dir(dir.join("coord"))
+        .ok()?
+        .flatten()
+        .next()?
+        .path();
+    let ticket = std::fs::read_dir(host.join("queue"))
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|e| e == "want"))?;
+    let modified = std::fs::metadata(ticket).ok()?.modified().ok()?;
+    std::time::SystemTime::now().duration_since(modified).ok()
+}
+
+/// A worker that is busy for the length of a transcode must not let the tickets
+/// of the jobs waiting for it go stale: a stale ticket is dropped, and the
+/// client that wakes first takes the slot regardless of its weight.
+#[test]
+fn a_ticket_stays_fresh_while_the_only_slot_is_busy() {
+    let dir = std::env::temp_dir().join(format!("rrffmpeg-fresh-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let locks = Arc::new(LockDir::new(&dir));
+    let scheduler = Arc::new(
+        Scheduler::new(vec![worker()], locks, Duration::from_secs(60)).with_client("waiter", 100),
+    );
+    let job = |id: &str| Job {
+        id: id.to_string(),
+        program: Program::Ffmpeg,
+        args: Vec::new(),
+        priority: 0,
+        capability: None,
+    };
+
+    let holder = scheduler.clone();
+    let held = std::thread::spawn(move || {
+        let lease = holder
+            .acquire_blocking(&job("holder"), Duration::from_secs(5))
+            .expect("the holder takes the only slot");
+        std::thread::sleep(Duration::from_millis(3300));
+        drop(lease);
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    let waiter = scheduler.clone();
+    let waited = std::thread::spawn(move || {
+        let lease = waiter
+            .acquire_blocking(&job("waiter"), Duration::from_secs(10))
+            .expect("the waiter takes the slot once it frees");
+        drop(lease);
+    });
+
+    std::thread::sleep(Duration::from_millis(3000));
+    let age = ticket_age(&dir).expect("the waiter published a ticket");
+    assert!(
+        age < Duration::from_millis(1500),
+        "the ticket is {age:?} old: the queue drops it as dead after 3 s"
+    );
+
+    held.join().expect("holder thread");
+    waited.join().expect("waiter thread");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn charged_starts(dir: &std::path::Path) -> u64 {
     let host = std::fs::read_dir(dir.join("coord"))
         .expect("coord dir")

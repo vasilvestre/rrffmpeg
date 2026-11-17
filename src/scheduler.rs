@@ -91,14 +91,19 @@ impl Scheduler {
         if let Some(lease) = self.acquire(job) {
             return Some(lease);
         }
-        let mut lanes = self.lanes(job);
+        let lanes = self.lanes(job);
         let mut wait = base_interval(job.priority);
         loop {
             let mut ready = false;
+            // Refresh every ticket, not only the one for a host with a free
+            // slot: a full host can stay full for the length of a transcode,
+            // and a ticket nobody refreshed is dropped as dead after 3 s.
+            for lane in lanes.values() {
+                self.queue.refresh(lane);
+            }
             if let Some(index) = self.pick_host(job.capability.as_deref()) {
                 let host = &self.hosts[index];
-                if let Some(lane) = lanes.get_mut(&host.name) {
-                    self.queue.refresh(lane);
+                if let Some(lane) = lanes.get(&host.name) {
                     ready = self.queue.ahead(lane);
                     if ready && let Some(guard) = self.locks.try_acquire(host, &job.id) {
                         // Only a job that had to wait is charged, so the
