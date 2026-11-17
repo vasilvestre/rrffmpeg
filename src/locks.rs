@@ -5,6 +5,11 @@
 //! drops the lock when the last descriptor closes, so SIGKILL leaves no stale
 //! lock behind. Every failure here falls open: a broken state dir must never
 //! stop a transcode.
+//!
+//! A dropped guard can still read as held for a moment: `fork` copies the
+//! descriptor table, so a child keeps a duplicate of the locked descriptor
+//! until its `exec`. Placement leans conservative when that happens, which
+//! costs a retry and nothing else.
 
 use crate::Host;
 use std::fs::{File, OpenOptions, TryLockError};
@@ -198,6 +203,19 @@ mod tests {
         }
     }
 
+    /// Poll until `cond` holds. A slot freed in this process can still look
+    /// held for the moment a forked child needs to reach its `exec`.
+    fn eventually(mut cond: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if cond() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
     fn scratch(tag: &str) -> (PathBuf, LockDir) {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -241,7 +259,10 @@ mod tests {
         let host = host("worker", 1);
         let first = locks.try_acquire(&host, "job-a").expect("the only slot");
         drop(first);
-        assert!(locks.try_acquire(&host, "job-b").is_some());
+        assert!(
+            eventually(|| locks.try_acquire(&host, "job-b").is_some()),
+            "the slot stayed held after its guard dropped"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -254,9 +275,15 @@ mod tests {
         let b = locks.try_acquire(&host, "job-b").expect("another slot");
         assert_eq!(locks.occupancy(&host), 2);
         drop(a);
-        assert_eq!(locks.occupancy(&host), 1);
+        assert!(
+            eventually(|| locks.occupancy(&host) == 1),
+            "occupancy did not drop after one guard was freed"
+        );
         drop(b);
-        assert_eq!(locks.occupancy(&host), 0);
+        assert!(
+            eventually(|| locks.occupancy(&host) == 0),
+            "occupancy did not reach zero after both guards were freed"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
