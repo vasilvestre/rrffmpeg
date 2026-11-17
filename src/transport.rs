@@ -470,9 +470,11 @@ mod tests {
         let mut probing = ssh(fake_exit_ssh(&dir, &probe_argv, 0), &dir);
         probing.persist = s.persist.clone();
         assert!(probing.probe(&host()));
-        assert!(recorded(&probe_argv)
-            .iter()
-            .any(|a| a == "ControlMaster=auto"));
+        assert!(
+            recorded(&probe_argv)
+                .iter()
+                .any(|a| a == "ControlMaster=auto")
+        );
     }
 
     #[test]

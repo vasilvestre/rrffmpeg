@@ -258,8 +258,7 @@ to = "/home/bob/media"
         assert_eq!(cfg.ssh_socket_dir, None);
         let off = Config::from_toml("ssh_persist_secs = 0").unwrap();
         assert_eq!(off.ssh_persist_secs, 0);
-        let pinned =
-            Config::from_toml("ssh_socket_dir = \"/run/user/1000/rffmpeg\"").unwrap();
+        let pinned = Config::from_toml("ssh_socket_dir = \"/run/user/1000/rffmpeg\"").unwrap();
         assert_eq!(
             pinned.ssh_socket_dir,
             Some(PathBuf::from("/run/user/1000/rffmpeg"))
