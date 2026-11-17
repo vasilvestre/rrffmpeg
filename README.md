@@ -124,8 +124,9 @@ Ship the smallest thing that is strictly better than rffmpeg. State today:
   class first, so a probe beats a transcode, then `starts / client_weight`, so
   two clients share a busy worker in the ratio of their weights. Both need
   every client to point at the same `state_dir`. ADR 0012.
-- [ ] No commit and no replay of production invocations yet. `docs/replay.md`
-  explains how to record them on the client.
+- [x] A replay harness driven by invocations recorded on the production pair.
+  Six job classes came from Jellyfin 12.1.0; trickplay extraction and a
+  failing probe are still hand-written. `docs/replay.md`.
 
 Success criterion: the production pair (`client` → `worker`) runs on rrffmpeg
 for a week, dispatch p99 under 50 ms, and nobody has to run a repair command.
