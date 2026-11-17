@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>rrffmpeg: a dispatcher for Jellyfin transcodes</title>
-<meta name="description" content="rrffmpeg stands in for ffmpeg inside Jellyfin and sends each transcode to a machine that has the GPU. Arguments pass through unchanged.">
+<title>rrffmpeg: a remote FFmpeg wrapper for Jellyfin</title>
+<meta name="description" content="rrffmpeg is a remote FFmpeg wrapper in Rust. It stands in for ffmpeg inside Jellyfin and sends each transcode to the machine that has the GPU, over SSH or through its own agent. Arguments pass through unchanged.">
 <style>
   :root {
     --fg: #1b1d1e;
@@ -72,12 +72,12 @@
 <body>
 
 <h1>rrffmpeg</h1>
-<p class="lead">A correct dispatcher for Jellyfin transcodes. It stands in for
-<code>ffmpeg</code> and sends each job to the machine that has the GPU. It
-never touches video quality, remuxing or encoding. Only dispatch.</p>
+<p class="lead">A remote FFmpeg wrapper in Rust. It stands in for
+<code>ffmpeg</code> and sends each job to the machine that has the GPU, over SSH
+or through the <code>rrffmpeg-agent</code> daemon. It never touches video
+quality, remuxing or encoding. Only dispatch.</p>
 
-<p>Written in Rust. One dependency-free static binary, no daemon on the client,
-no database.</p>
+<p>One dependency-free static binary, no daemon on the client, no database.</p>
 
 <h2>Why it exists</h2>
 
@@ -122,10 +122,12 @@ people running it have no maintained dispatcher.</p>
   <li><b>Path mapping in both directions.</b> Longest-prefix mapping for input
   and output, so the worker can mount media and the HLS tmpfs at another
   root.</li>
-  <li><b>SSH transport.</b> Zero install on the worker. A tiny agent daemon is
-  planned to remove the per-job probe.</li>
+  <li><b>Two transports, one per host.</b> SSH needs nothing installed on the
+  worker. Or run the small <code>rrffmpeg-agent</code> daemon and skip the
+  per-job handshake and probe. The scheduler does not know which one a host
+  uses.</li>
   <li><b>Priority as a hint.</b> Probes poll for a slot faster than transcodes.
-  Ordering across processes waits for the agent.</li>
+  The poll is not a queue, so order is best effort, agent or not.</li>
 </ul>
 
 <h2>Install</h2>
@@ -142,6 +144,9 @@ tar xzf rrffmpeg-x86_64-unknown-linux-musl.tar.gz
 sudo install -m 755 rrffmpeg-x86_64-unknown-linux-musl/rrffmpeg /usr/local/bin/rrffmpeg
 sudo ln -sf /usr/local/bin/rrffmpeg /usr/local/bin/ffmpeg
 sudo ln -sf /usr/local/bin/rrffmpeg /usr/local/bin/ffprobe</code></pre>
+
+<p>The same tarball carries <code>rrffmpeg-agent</code> for the worker. Copy it
+there only if you want the agent transport instead of SSH.</p>
 
 <p>Point Jellyfin at <code>/usr/local/bin/ffmpeg</code>. Without a config file
 the binary runs the local ffmpeg and does nothing else, so the install is safe
@@ -164,7 +169,8 @@ below.</p>
     <tr><td><code>queue_wait_secs</code></td><td><code>600</code></td><td>How long a job waits for a free worker slot before running locally.</td></tr>
     <tr><td><code>down_ttl_secs</code></td><td><code>60</code></td><td>How long one process's "host down" verdict is trusted by the others. Expiry is the repair mechanism.</td></tr>
     <tr><td><code>stderr_as_stdout</code></td><td><code>false</code></td><td>Copy ffmpeg stderr to stdout, for Jellyfin builds that read probe output there.</td></tr>
-    <tr><td><code>ssh_bin</code></td><td><code>ssh</code></td><td>SSH client used for the transport.</td></tr>
+    <tr><td><code>ssh_bin</code></td><td><code>ssh</code></td><td>SSH client used for hosts without <code>agent_addr</code>.</td></tr>
+    <tr><td><code>agent_token</code></td><td>none</td><td>Shared secret of the agent daemon. <code>RRFFMPEG_AGENT_TOKEN</code> wins over it. Required if any host sets <code>agent_addr</code>.</td></tr>
     <tr><td><code>local_ffmpeg</code></td><td><code>ffmpeg</code></td><td>Binary used when a job runs locally. Point it away from the symlink or you loop.</td></tr>
     <tr><td><code>local_ffprobe</code></td><td><code>ffprobe</code></td><td>Same, for ffprobe.</td></tr>
   </tbody>
@@ -180,6 +186,7 @@ below.</p>
     <tr><td><code>capabilities</code></td><td><code>[]</code></td><td>Advertised encoders, for example <code>["vaapi"]</code>.</td></tr>
     <tr><td><code>ffmpeg_bin</code></td><td>inherited</td><td>ffmpeg path on the worker.</td></tr>
     <tr><td><code>ffprobe_bin</code></td><td>inherited</td><td>ffprobe path on the worker.</td></tr>
+    <tr><td><code>agent_addr</code></td><td>none</td><td><code>host:port</code> of <code>rrffmpeg-agent</code>. Set it to skip SSH for this host.</td></tr>
     <tr><td><code>paths</code></td><td><code>[]</code></td><td>Path maps, see below.</td></tr>
   </tbody>
 </table>
@@ -214,9 +221,10 @@ to = "/home/bob/transcode"</code></pre>
 <h2>Status</h2>
 
 <p>Working today: passthrough verified against real ffmpeg 8.0.1, one worker
-over SSH, path mapping both ways, journal plus janitor, per-host cap,
-capability match. Not yet: requeue after a dead client (needs the agent),
-priority ordering across processes, recorded-invocation replay.</p>
+over SSH, an agent transport, path mapping both ways, journal plus janitor,
+per-host cap, capability match. Not yet: requeue after a dead client (the
+agent kills the orphan instead), priority ordering across processes,
+recorded-invocation replay.</p>
 
 <p>Design choices and their costs are written down in the
 <a href="adr/">decision records</a>.</p>

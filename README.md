@@ -1,9 +1,13 @@
-# rrffmpeg: a correct dispatcher for Jellyfin transcodes
+# rrffmpeg: a remote FFmpeg wrapper for Jellyfin transcodes
 
-`rrffmpeg` is a Rust rewrite of [rffmpeg](https://github.com/joshuaboniface/rffmpeg).
-It does one thing: it stands in for `ffmpeg` inside Jellyfin and sends each
-transcode job to a machine that has the GPU. It does not touch video quality,
-remuxing or encoding. Only dispatch.
+`rrffmpeg` is a remote FFmpeg wrapper in Rust. Like
+[rffmpeg](https://github.com/joshuaboniface/rffmpeg), it stands in for `ffmpeg`
+inside Jellyfin and sends each transcode command to a machine that has the GPU,
+over SSH or through the `rrffmpeg-agent` daemon. Unlike rffmpeg, dispatch does
+not wait on an fsync, a dead host is retested instead of marked bad forever,
+and the orphans `SIGKILL` leaves behind get reaped.
+
+It does not touch video quality, remuxing or encoding. Only dispatch.
 
 The goal is not "rffmpeg in Rust". The goal is a dispatcher whose state model
 is honest, whose bookkeeping never blocks the stream, and that repairs itself
@@ -78,19 +82,21 @@ cost.
 
 - **Bookkeeping off the hot path.** Job state goes to an append-only WAL
   journal with a background flusher. The transcode starts immediately; the
-  bookkeeping catches up out of band. Host selection reads a fast in-memory
-  counter, so async writes cannot undercount running jobs (the trap that
-  breaks naive async).
+  bookkeeping catches up out of band. Host capacity lives in the state dir, not
+  in this process, so a forked job still sees it.
 - **Explicit state with reconciliation.** A janitor thread re-tests unhealthy
   hosts, reaps orphan processes, and requeues jobs when a worker disappears.
   The state model is the opposite of "newest row wins".
-- **Priority queue.** Jobs carry a priority; seeks and probes do not starve
-  long transcodes.
+- **Priority as a hint.** Probes poll for a slot faster than transcodes.
+  Ordering across processes needs the agent daemon.
 - **Capability-aware placement.** Workers advertise VAAPI/NVENC/QSV and their
-  concurrency limit. The scheduler matches, instead of a global weight.
-- **Transport: agent first, SSH fallback.** A tiny worker daemon removes the
-  per-job SSH probe and makes retry/requeue natural. SSH stays as a
-  zero-install fallback.
+  concurrency limit. The scheduler matches, instead of a global weight. The
+  limit is enforced by one exclusive lock file per slot, freed by the kernel
+  when the process dies.
+- **Transport: agent, or SSH fallback, per host.** A tiny worker daemon removes
+  the per-job SSH handshake and the per-job probe, and tells the client which
+  jobs are alive. A host without `agent_addr` keeps using SSH, which needs
+  nothing installed.
 - **Path mapping.** Logical variables (as in dffmpeg) so client and worker can
   mount media at different roots. The host probe stats every mapped root, so a
   dropped or hung mount marks the worker down instead of failing each job.
@@ -103,21 +109,54 @@ Ship the smallest thing that is strictly better than rffmpeg. State today:
   correct `stdin`/`stdout`/`stderr` handling (including rffmpeg's
   `stderr_as_stdout` special-case). Verified against real ffmpeg 8.0.1.
 - [x] One worker over SSH, with path mapping in both directions.
+- [x] Agent transport: `rrffmpeg-agent` on the worker, one TCP connection per
+  job. `agent_addr` on a host selects it, else SSH. No TLS, see ADR 0009.
 - [x] Async WAL bookkeeping plus a janitor (re-test, reap). Requeue waits for
   the agent transport: a dead client has nobody left to retry.
-- [x] Per-host concurrency cap and capability matching.
-- [ ] Priority across processes: the queue is per process until the daemon
-  exists.
+- [x] Per-host concurrency cap and capability matching. The cap holds across
+  processes with `flock` slot files under `state_dir/coord/`, and the
+  host-down verdict is shared with an expiry.
+- [ ] Priority across processes. A job polls for a slot with backoff and a
+  probe polls faster, but the poll is not a queue, so order is not guaranteed
+  even with the agent.
 - [ ] No commit and no replay of production invocations yet. `docs/replay.md`
   explains how to record them on the client.
 
 Success criterion: the production pair (`client` → `worker`) runs on rrffmpeg
 for a week, dispatch p99 under 50 ms, and nobody has to run a repair command.
 
+## Agent transport
+
+SSH needs nothing on the worker. The agent removes the per-job handshake and
+the per-job probe, and it answers "is this job still running" from memory.
+
+On the worker:
+
+```bash
+install -D rrffmpeg-agent ~/.local/bin/rrffmpeg-agent
+RRFFMPEG_AGENT_TOKEN=change-me rrffmpeg-agent --listen 0.0.0.0:9876
+```
+
+Keep it behind a private interface. The token travels in clear text and the
+daemon runs whatever argv the token holder sends, so bind to a VPN address and
+not to a public one.
+
+On the client, set the token and the address:
+
+```toml
+agent_token = "change-me"
+
+[[hosts]]
+name = "worker"
+agent_addr = "worker:9876"
+```
+
+The address may differ from `name`. A host without `agent_addr` keeps using
+SSH, so one config can mix both transports.
+
 ## Later
 
 - Priority and capability-aware placement.
-- Agent transport.
 - Multi-worker balancing.
 - A replay harness that records real Jellyfin invocations and replays them, so
   "stability" can be measured instead of felt.
@@ -144,6 +183,23 @@ Measured on 2026-11-17 on the production pair:
   with `tonemap_opencl`, 2.67x realtime on 1080p SDR.
 - A `bad`-host incident caused a full outage on a single-GPU-worker setup and
   required an external cron watchdog to clear the stale row.
+
+## Install
+
+Each `v*` tag publishes static Linux builds for `x86_64` and `aarch64` on the
+releases page, with a `.sha256` file next to each tarball. A static build needs
+no Rust toolchain and no matching glibc on the Jellyfin host.
+
+```bash
+curl -LO https://github.com/vasilvestre/rrfmpeg/releases/latest/download/rrffmpeg-x86_64-unknown-linux-musl.tar.gz
+sha256sum -c rrffmpeg-x86_64-unknown-linux-musl.tar.gz.sha256
+tar xzf rrffmpeg-x86_64-unknown-linux-musl.tar.gz
+sudo install -m 755 rrffmpeg-x86_64-unknown-linux-musl/rrffmpeg /usr/local/bin/rrffmpeg
+sudo ln -sf /usr/local/bin/rrffmpeg /usr/local/bin/ffmpeg
+sudo ln -sf /usr/local/bin/rrffmpeg /usr/local/bin/ffprobe
+```
+
+The two symlinks matter: Jellyfin finds `ffprobe` next to `ffmpeg`.
 
 ## Next
 
