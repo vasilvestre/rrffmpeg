@@ -37,6 +37,10 @@ def handle(client):
     except OSError:
         client.close()
         return
+    # Without this, Nagle plus delayed ACK adds about 40 ms per exchange and
+    # the relay stops being transparent.
+    for sock in (client, up):
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     for a, b in ((client, up), (up, client)):
         threading.Thread(target=pump, args=(a, b), daemon=True).start()
 
