@@ -48,6 +48,14 @@ fn run() -> Result<i32> {
     let argv0 = argv.next().unwrap_or_default();
     let args: Vec<OsString> = argv.collect();
 
+    // Answered before the config loads, so a broken config still reports the
+    // version running here. Only the real name, never the ffmpeg symlink:
+    // `ffmpeg --version` must keep reaching ffmpeg.
+    if invoked_as_rrffmpeg(&argv0) && args.len() == 1 && args[0] == "--version" {
+        println!("rrffmpeg {}", env!("CARGO_PKG_VERSION"));
+        return Ok(0);
+    }
+
     let program = program_for(&argv0, &args);
     let config = Config::load()?;
     let agent = agent_client(&config)?;
@@ -294,6 +302,12 @@ fn required_capability(args: &[OsString]) -> Option<String> {
         }
     }
     None
+}
+
+fn invoked_as_rrffmpeg(argv0: &OsString) -> bool {
+    std::path::Path::new(argv0)
+        .file_name()
+        .is_some_and(|n| n.eq_ignore_ascii_case("rrffmpeg"))
 }
 
 fn program_for(argv0: &OsString, args: &[OsString]) -> Program {

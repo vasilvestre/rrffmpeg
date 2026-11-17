@@ -52,9 +52,16 @@ const HANDSHAKE: Duration = Duration::from_secs(5);
 /// the pump, the pipe fills, and ffmpeg waits: that is the backpressure.
 const QUEUE: usize = 64;
 
+/// Revision of the client/daemon protocol. Bump it when a frame or a field
+/// changes meaning; the daemon refuses a peer that speaks another revision.
+const PROTOCOL: u32 = 1;
+
 /// What the client says first on every connection.
 #[derive(Debug, Serialize, Deserialize)]
 struct Hello {
+    /// Left at 0 by a client older than this field, so the daemon can say so.
+    #[serde(default)]
+    version: u32,
     token: String,
     /// `exec` runs a job on the control connection, `stdin` carries its input,
     /// `status` answers a probe and a liveness check.
@@ -432,6 +439,7 @@ impl Agent {
     /// The stdin connection: one thread writes it, nobody reads it here.
     fn stdin_thread(&self, host: Host, job_id: String, stdin: Option<Box<dyn Read + Send>>) {
         let hello = Hello {
+            version: PROTOCOL,
             token: self.token.clone(),
             op: "stdin".into(),
             job: job_id.clone(),
@@ -498,6 +506,7 @@ impl Agent {
         }
 
         let hello = Hello {
+            version: PROTOCOL,
             token: self.token.clone(),
             op: "exec".into(),
             job: job.id.clone(),
@@ -595,6 +604,7 @@ impl Agent {
         let mut stream = self.hello(
             host,
             &Hello {
+                version: PROTOCOL,
                 token: self.token.clone(),
                 op: "status".into(),
                 job: job.unwrap_or_default().to_string(),
@@ -723,6 +733,7 @@ fn handle(stream: TcpStream, token: &str, live: &Live, tls: Arc<ServerConfig>) -
     }
     let hello: Hello =
         serde_json::from_slice(&body).map_err(|e| Error::Transport(format!("hello: {e}")))?;
+    check_protocol(hello.version, &peer)?;
     if !token_eq(&hello.token, token) {
         return Err(Error::Transport(format!("bad token from {peer}")));
     }
@@ -736,6 +747,16 @@ fn handle(stream: TcpStream, token: &str, live: &Live, tls: Arc<ServerConfig>) -
         "stdin" => stdin_reply(stream, framer, &hello, live),
         other => Err(Error::Transport(format!("unknown op {other}"))),
     }
+}
+
+/// Refuse a peer built from another revision before any frame is interpreted.
+fn check_protocol(version: u32, peer: &str) -> Result<()> {
+    if version == PROTOCOL {
+        return Ok(());
+    }
+    Err(Error::Transport(format!(
+        "agent protocol {version} from {peer}, this daemon speaks {PROTOCOL}: install the same release on the client and the worker"
+    )))
 }
 
 /// Complete the handshake, then let the caller decide about timeouts.
@@ -1150,5 +1171,27 @@ mod tests {
         let h = host("127.0.0.1:1", "/bin/echo");
         assert!(exec(&agent(), &h, &job(&["x"]), None).is_err());
         assert!(!agent().probe(&h));
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+
+    #[test]
+    fn a_peer_from_another_revision_is_refused_by_name() {
+        assert!(check_protocol(PROTOCOL, "worker").is_ok());
+        // A client older than the field sends no version at all.
+        let err = check_protocol(0, "worker").unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("protocol 0"), "{text}");
+        assert!(text.contains("this daemon speaks 1"), "{text}");
+    }
+
+    #[test]
+    fn an_old_client_hello_parses_as_revision_zero() {
+        let hello: Hello =
+            serde_json::from_str(r#"{"token":"t","op":"status"}"#).expect("old hello");
+        assert_eq!(hello.version, 0);
     }
 }

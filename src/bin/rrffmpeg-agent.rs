@@ -36,6 +36,10 @@ fn main() {
                 );
                 return;
             }
+            "--version" => {
+                println!("rrffmpeg-agent {}", env!("CARGO_PKG_VERSION"));
+                return;
+            }
             other => {
                 eprintln!("rrffmpeg-agent: unknown option {other}");
                 std::process::exit(2);

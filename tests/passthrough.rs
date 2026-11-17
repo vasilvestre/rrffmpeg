@@ -93,3 +93,49 @@ fn probe_name_selects_ffprobe() {
         .output();
     assert_eq!(String::from_utf8_lossy(&out.unwrap().stdout), "ffmpeg\n");
 }
+
+#[test]
+fn version_reports_the_build_before_the_config_loads() {
+    // A config path that does not parse must not stand between the operator and
+    // the answer "which build is this".
+    let out = run(
+        "/nonexistent/ffmpeg",
+        &["--version"],
+        &[("RRFFMPEG_CONFIG", "/nonexistent/rrffmpeg.toml")],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        format!("rrffmpeg {}", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn the_ffmpeg_name_still_forwards_version() {
+    // Jellyfin derives ffprobe from the ffmpeg path and probes with -version, so
+    // the symlinked name must stay transparent to both spellings.
+    let dir = std::env::temp_dir().join("rrffmpeg-test-version-name");
+    std::fs::create_dir_all(&dir).unwrap();
+    let link = dir.join("ffmpeg");
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rrffmpeg"), &link).unwrap();
+
+    // A stand-in that prints its own argument, so the test sees what arrived.
+    let real = dir.join("real-ffmpeg");
+    std::fs::write(&real, "#!/bin/sh\nprintf '%s\\n' \"$1\"\n").unwrap();
+    let mut perm = std::fs::metadata(&real).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
+    std::fs::set_permissions(&real, perm).unwrap();
+
+    let out = Command::new(&link)
+        .arg("--version")
+        .env("RRFFMPEG_BIN", &real)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "--version");
+}
