@@ -445,7 +445,7 @@ impl Agent {
                 // shortcut: without this connection the job runs with no
                 // stdin, so Jellyfin's `q` is lost. It costs a transcode, not
                 // an answer, so log it and let the job finish.
-                eprintln!("rrffmpeg: agent {} stdin: {e}", host.name);
+                crate::log_at!(crate::log::Level::Warn, "agent {} stdin: {e}", host.name);
                 return;
             }
         };
@@ -482,6 +482,7 @@ impl Agent {
         out: &mut dyn Write,
         err: &mut dyn Write,
     ) -> Result<i32> {
+        let started = Instant::now();
         let program = match job.program {
             Program::Ffmpeg => host.ffmpeg_bin.as_deref().unwrap_or("ffmpeg"),
             Program::Ffprobe => host.ffprobe_bin.as_deref().unwrap_or("ffprobe"),
@@ -543,14 +544,18 @@ impl Agent {
         };
         std::thread::spawn(move || me.stdin_thread(stdin_host, id, stdin));
 
+        let mut stdout_bytes = 0usize;
+        let mut stderr_bytes = 0usize;
         loop {
             match recv(&mut ctl, &mut framer, None) {
                 Ok((STDOUT, body)) => {
+                    stdout_bytes += body.len();
                     out.write_all(&body)
                         .map_err(|e| io_err(e, "writing stdout"))?;
                     let _ = out.flush();
                 }
                 Ok((STDERR, body)) => {
+                    stderr_bytes += body.len();
                     let sink: &mut dyn Write = if stderr_as_stdout {
                         &mut *out
                     } else {
@@ -561,6 +566,14 @@ impl Agent {
                     let _ = sink.flush();
                 }
                 Ok((EXIT, body)) if body.len() == 4 => {
+                    crate::log_at!(
+                        crate::log::Level::Debug,
+                        "job {} relayed {} B stdout, {} B stderr in {} ms",
+                        job.id,
+                        stdout_bytes,
+                        stderr_bytes,
+                        started.elapsed().as_millis()
+                    );
                     ctl.close();
                     return Ok(i32::from_be_bytes([body[0], body[1], body[2], body[3]]));
                 }

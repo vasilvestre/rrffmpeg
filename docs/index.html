@@ -192,7 +192,10 @@ before the worker exists.</p>
 <p>The file is read from <code>$RRFFMPEG_CONFIG</code>, then
 <code>$XDG_CONFIG_HOME/rffmpeg/config.toml</code>, then
 <code>~/.config/rffmpeg/config.toml</code>. Missing keys take the defaults
-below.</p>
+below. <code>RRFFMPEG_LOG</code> sets the log level: <code>off</code>,
+<code>error</code>, <code>warn</code>, <code>info</code> or <code>debug</code>,
+default <code>warn</code>. Logs go to stderr; <code>debug</code> adds the
+relayed byte count per job on the agent path.</p>
 
 <h3>Top level</h3>
 

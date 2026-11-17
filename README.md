@@ -311,6 +311,22 @@ one JSON object per line, and `--json` gives the same figures in one object.
 The benchmark behind the transport numbers, with its method and raw runs, is in
 `docs/latency.md`.
 
+## Logging
+
+`RRFFMPEG_LOG` sets the log level. The values are `off`, `error`, `warn`,
+`info` and `debug`. The default is `warn`, so a normal run prints only warnings
+and errors. Every line goes to stderr, never stdout.
+
+```bash
+RRFFMPEG_LOG=debug RRFFMPEG_CONFIG=~/.config/rffmpeg/config.toml ffmpeg -version
+```
+
+At `debug` the client prints one line per job on the agent path:
+`job <id> relayed <n> B stdout, <m> B stderr in <t> ms`. Use it to see the cost
+of a large passthrough such as `ffmpeg -encoders`. The SSH transport hands
+inherited file descriptors to `ssh`, so it cannot count bytes and does not log
+them.
+
 ## Next
 
 ```bash

@@ -332,6 +332,7 @@ mod tests {
     #[test]
     fn remote_command_has_the_exact_shape() {
         let dir = fixture("shape");
+        let _serial = crate::exclusive();
         let s = ssh(dir.join("unused-ssh"), &dir);
         let remote = s
             .remote_command(&job(&["a b", "it's", "$HOME", "x;y"]), &host(), false)
@@ -350,6 +351,7 @@ mod tests {
     #[test]
     fn a_host_can_override_the_remote_command() {
         let dir = fixture("override");
+        let _serial = crate::exclusive();
         let s = ssh(dir.join("unused-ssh"), &dir);
         let mut h = host();
         h.ffmpeg_bin = Some("/home/bob/.bin/rrj/jellyfin-ffmpeg.sh".into());
@@ -368,6 +370,7 @@ mod tests {
     #[test]
     fn the_redirect_is_added_only_when_asked() {
         let dir = fixture("redirect");
+        let _serial = crate::exclusive();
         let s = ssh(dir.join("unused-ssh"), &dir);
         let plain = s
             .remote_command(&job(&["-v", "error"]), &host(), false)
@@ -383,6 +386,7 @@ mod tests {
     #[test]
     fn ssh_gets_one_remote_argument_and_no_local_shell() {
         let dir = fixture("argv");
+        let _serial = crate::exclusive();
         let argv = dir.join("argv");
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -406,6 +410,7 @@ mod tests {
     #[test]
     fn hostile_arguments_arrive_unchanged_on_the_worker() {
         let dir = fixture("hostile");
+        let _serial = crate::exclusive();
         let argv = dir.join("argv");
         let out = dir.join("out");
         let bin = dir.join("bin");
@@ -425,6 +430,7 @@ mod tests {
     #[test]
     fn the_pid_file_holds_the_remote_pid() {
         let dir = fixture("pidfile");
+        let _serial = crate::exclusive();
         let argv = dir.join("argv");
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -441,6 +447,7 @@ mod tests {
     #[test]
     fn a_failing_transfer_marks_the_probe_down() {
         let dir = fixture("probe-down");
+        let _serial = crate::exclusive();
         let argv = dir.join("argv");
         let s = ssh(fake_exit_ssh(&dir, &argv, 1), &dir);
         assert!(!s.probe(&host()));
@@ -462,6 +469,7 @@ mod tests {
     #[test]
     fn a_reachable_host_passes_the_probe() {
         let dir = fixture("probe-up");
+        let _serial = crate::exclusive();
         let argv = dir.join("argv");
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -472,6 +480,7 @@ mod tests {
     #[test]
     fn the_probe_checks_every_mapped_root() {
         let dir = fixture("probe-paths");
+        let _serial = crate::exclusive();
         let argv = dir.join("argv");
         let s = ssh(fake_exit_ssh(&dir, &argv, 0), &dir);
         let mut h = host();
@@ -498,6 +507,7 @@ mod tests {
     #[test]
     fn a_missing_mapped_root_marks_the_host_down() {
         let dir = fixture("probe-no-root");
+        let _serial = crate::exclusive();
         let argv = dir.join("argv");
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -514,6 +524,7 @@ mod tests {
     #[test]
     fn a_live_pid_means_the_job_is_alive() {
         let dir = fixture("alive");
+        let _serial = crate::exclusive();
         let argv = dir.join("argv");
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -532,6 +543,7 @@ mod tests {
     #[test]
     fn a_missing_pid_file_means_the_job_is_dead() {
         let dir = fixture("dead");
+        let _serial = crate::exclusive();
         let argv = dir.join("argv");
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -542,6 +554,7 @@ mod tests {
     #[test]
     fn a_non_utf8_argument_is_refused_instead_of_corrupted() {
         let dir = fixture("non-utf8");
+        let _serial = crate::exclusive();
         let s = ssh(dir.join("unused-ssh"), &dir);
         use std::os::unix::ffi::OsStringExt;
         let mut job = job(&["-i"]);

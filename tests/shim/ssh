@@ -1,0 +1,5 @@
+#!/bin/sh
+# Put this directory first on PATH: the dispatcher calls `ssh` with no port
+# option, so the relay needs a wrapper to reach the sshd behind it.
+# Absolute path, or this script would exec itself.
+exec /usr/bin/ssh -p 2222 "$@"

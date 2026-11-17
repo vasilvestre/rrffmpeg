@@ -4,6 +4,7 @@ pub mod agent;
 pub mod config;
 pub mod janitor;
 pub mod locks;
+pub mod log;
 pub mod paths;
 pub mod queue;
 pub mod scheduler;
@@ -63,3 +64,15 @@ impl From<std::io::Error> for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// One test at a time for the tests that write executables or spawn processes.
+///
+/// `fork` copies the whole descriptor table, so a child forked by another test
+/// thread keeps a script this thread is writing open for writing until it execs.
+/// Executing that script then fails with `ETXTBSY`. There is no per-test way to
+/// avoid the copy, so those tests take this lock for their whole body.
+#[cfg(test)]
+pub(crate) fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}

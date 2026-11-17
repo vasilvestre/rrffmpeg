@@ -275,6 +275,7 @@ mod tests {
     #[test]
     fn concurrency_cap_is_never_exceeded() {
         let (dir, locks) = scratch("cap");
+        let _serial = crate::exclusive();
         let scheduler = Arc::new(Scheduler::new(
             vec![host("w", 2, &[])],
             locks,
@@ -331,6 +332,7 @@ mod tests {
     #[test]
     fn down_host_is_skipped_and_mark_up_restores_it() {
         let (dir, scheduler) = build(vec![host("w", 1, &[])], "down");
+        let _serial = crate::exclusive();
         scheduler.mark_down("w");
         assert!(scheduler.is_down("w"));
         assert!(scheduler.acquire(&job(0, None)).is_none());
@@ -345,6 +347,7 @@ mod tests {
     #[test]
     fn load_spreads_across_hosts_before_filling_one() {
         let (dir, scheduler) = build(vec![host("a", 2, &[]), host("b", 2, &[])], "spread");
+        let _serial = crate::exclusive();
         let mut leases = Vec::new();
         for _ in 0..4 {
             leases.push(scheduler.acquire(&job(0, None)).expect("a lease"));
@@ -359,6 +362,7 @@ mod tests {
     #[test]
     fn blocking_acquire_times_out_then_wakes_on_release() {
         let (dir, locks) = scratch("blocking");
+        let _serial = crate::exclusive();
         let scheduler = Arc::new(Scheduler::new(
             vec![host("w", 1, &[])],
             locks,
@@ -384,6 +388,7 @@ mod tests {
     #[test]
     fn a_probe_takes_the_slot_a_transcode_is_waiting_for() {
         let (dir, locks) = scratch("probe-first");
+        let _serial = crate::exclusive();
         let scheduler = Arc::new(Scheduler::new(
             vec![host("w", 1, &[])],
             locks,
@@ -421,6 +426,7 @@ mod tests {
     #[test]
     fn a_job_that_had_to_wait_is_charged_to_its_client() {
         let (dir, locks) = scratch("charge");
+        let _serial = crate::exclusive();
         let scheduler = Arc::new(
             Scheduler::new(
                 vec![host("w", 1, &[])],
@@ -450,6 +456,7 @@ mod tests {
     #[test]
     fn the_weight_is_clamped_to_the_kernel_range() {
         let (dir, locks) = scratch("weight-clamp");
+        let _serial = crate::exclusive();
         let low = Scheduler::new(vec![host("w", 1, &[])], locks, Duration::from_secs(60))
             .with_client("alice", 0);
         assert_eq!(low.weight, 1);

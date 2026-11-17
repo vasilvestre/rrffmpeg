@@ -93,8 +93,9 @@ fn run() -> Result<i32> {
     ) {
         Dispatch::Ran(code) => Ok(code),
         Dispatch::NoSlot => {
-            eprintln!(
-                "rrffmpeg: no worker slot after {}s, running locally",
+            rrffmpeg::log_at!(
+                rrffmpeg::log::Level::Warn,
+                "no worker slot after {}s, running locally",
                 config.queue_wait_secs
             );
             run_local(&config, program, &args, stderr_as_stdout)
