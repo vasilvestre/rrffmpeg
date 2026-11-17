@@ -1,0 +1,179 @@
+//! Worker list and paths, loaded from a TOML file.
+//!
+//! The file lives at `$RRFFMPEG_CONFIG`, else `$XDG_CONFIG_HOME/rffmpeg/config.toml`,
+//! else `~/.config/rffmpeg/config.toml`. A missing file means "no workers", and
+//! the dispatcher then runs ffmpeg locally.
+
+use crate::{Error, Result};
+use serde::Deserialize;
+use std::path::PathBuf;
+
+fn one() -> usize {
+    1
+}
+
+fn default_state_dir() -> PathBuf {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    base.join("rrffmpeg")
+}
+
+fn default_ssh() -> PathBuf {
+    PathBuf::from("ssh")
+}
+
+fn default_ffmpeg() -> PathBuf {
+    PathBuf::from("ffmpeg")
+}
+
+fn default_ffprobe() -> PathBuf {
+    PathBuf::from("ffprobe")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Program {
+    Ffmpeg,
+    Ffprobe,
+}
+
+impl Program {
+    /// Name of the tool on the worker, and the local fallback.
+    pub fn binary(self) -> &'static str {
+        match self {
+            Program::Ffmpeg => "ffmpeg",
+            Program::Ffprobe => "ffprobe",
+        }
+    }
+}
+
+/// Rewrites one path prefix. The longest matching `from` wins.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PathMap {
+    pub from: PathBuf,
+    pub to: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Host {
+    /// `ssh` destination: `virmire`, `user@virmire`, or an IP.
+    pub name: String,
+    /// Maximum jobs sent to this host at once.
+    #[serde(default = "one")]
+    pub concurrency: usize,
+    /// Advertised accelerators: `vaapi`, `nvenc`, `qsv`. Empty accepts any job.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub paths: Vec<PathMap>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Config {
+    #[serde(default)]
+    pub hosts: Vec<Host>,
+    /// Send ffmpeg's stderr to stdout, as Jellyfin expects for some builds.
+    #[serde(default)]
+    pub stderr_as_stdout: bool,
+    #[serde(default = "default_state_dir")]
+    pub state_dir: PathBuf,
+    #[serde(default = "default_ssh")]
+    pub ssh_bin: PathBuf,
+    #[serde(default = "default_ffmpeg")]
+    pub local_ffmpeg: PathBuf,
+    #[serde(default = "default_ffprobe")]
+    pub local_ffprobe: PathBuf,
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        Config {
+            hosts: Vec::new(),
+            stderr_as_stdout: false,
+            state_dir: default_state_dir(),
+            ssh_bin: default_ssh(),
+            local_ffmpeg: default_ffmpeg(),
+            local_ffprobe: default_ffprobe(),
+        }
+    }
+}
+
+impl Config {
+    pub fn load() -> Result<Config> {
+        let Some(path) = config_path() else {
+            return Ok(Config::default());
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Config::from_toml(&text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+            Err(e) => Err(Error::Io(e, format!("reading {}", path.display()))),
+        }
+    }
+
+    pub fn from_toml(text: &str) -> Result<Config> {
+        toml::from_str(text).map_err(|e| Error::Config(e.to_string()))
+    }
+
+    /// Local binary for the program, used when no worker can take the job.
+    pub fn local_binary(&self, program: Program) -> &PathBuf {
+        match program {
+            Program::Ffmpeg => &self.local_ffmpeg,
+            Program::Ffprobe => &self.local_ffprobe,
+        }
+    }
+}
+
+fn config_path() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("RRFFMPEG_CONFIG") {
+        return Some(PathBuf::from(p));
+    }
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(base.join("rffmpeg/config.toml"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_worker_with_capabilities_and_paths() {
+        let cfg = Config::from_toml(
+            r#"
+stderr_as_stdout = true
+
+[[hosts]]
+name = "virmire"
+concurrency = 2
+capabilities = ["vaapi"]
+
+[[hosts.paths]]
+from = "/home/vasilves/media"
+to = "/home/my666/le4"
+"#,
+        )
+        .unwrap();
+        assert!(cfg.stderr_as_stdout);
+        assert_eq!(cfg.hosts.len(), 1);
+        assert_eq!(cfg.hosts[0].concurrency, 2);
+        assert_eq!(cfg.hosts[0].capabilities, vec!["vaapi".to_string()]);
+        assert_eq!(cfg.hosts[0].paths[0].to, PathBuf::from("/home/my666/le4"));
+    }
+
+    #[test]
+    fn a_worker_without_limits_defaults_to_one_slot() {
+        let cfg = Config::from_toml("[[hosts]]\nname = \"w\"\n").unwrap();
+        assert_eq!(cfg.hosts[0].concurrency, 1);
+        assert!(cfg.hosts[0].capabilities.is_empty());
+    }
+
+    #[test]
+    fn an_empty_file_is_a_valid_local_only_config() {
+        let cfg = Config::from_toml("").unwrap();
+        assert!(cfg.hosts.is_empty());
+        assert_eq!(cfg.local_ffmpeg, PathBuf::from("ffmpeg"));
+    }
+}

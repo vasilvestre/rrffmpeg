@@ -1,0 +1,26 @@
+# Example config for the production pair.
+# Copy to ~/.config/rffmpeg/config.toml, or point RRFFMPEG_CONFIG at it.
+#
+# Without this file rrffmpeg runs the local ffmpeg and does nothing else.
+
+# Jellyfin on some builds reads probe output on stdout.
+stderr_as_stdout = false
+
+# Journal and pid files. Put it on tmpfs if the disk is slow, the journal is
+# append-only and survives a reboot only for the janitor's benefit.
+state_dir = "/home/vasilves/.local/state/rrffmpeg"
+
+[[hosts]]
+name = "virmire"
+concurrency = 2
+capabilities = ["vaapi"]
+
+# Input: media mounted at a different root on the worker.
+[[hosts.paths]]
+from = "/home/vasilves"
+to = "/home/my666/le4"
+
+# Output: HLS segments on the client tmpfs, reached through a second mount.
+[[hosts.paths]]
+from = "/dev/shm/jellyfin-transcode"
+to = "/home/my666/transcode"

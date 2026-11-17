@@ -1,0 +1,1 @@
+{"program":"ffprobe","argv":["-loglevel","error","-show_format","-show_streams","-print_format","json","file:/media/movies/Locked (2019)/Locked.mkv"],"cwd":"/home/vasilves","label":"probe-unreadable","stderr_as_stdout":false,"exit_code":1}

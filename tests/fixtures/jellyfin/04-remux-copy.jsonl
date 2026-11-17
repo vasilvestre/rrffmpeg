@@ -1,0 +1,1 @@
+{"program":"ffmpeg","argv":["-loglevel","error","-i","file:@SRC@","-map","0:0","-map","0:1","-c","copy","-max_muxing_queue_size","2048","-f","matroska","/var/lib/jellyfin/transcodes/remux-4a1f9c2e.mkv"],"cwd":"/home/vasilves","label":"remux-copy","stderr_as_stdout":false,"exit_code":0}
