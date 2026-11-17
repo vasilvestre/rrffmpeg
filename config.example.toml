@@ -26,6 +26,15 @@ state_dir = "/home/alice/.local/state/rrffmpeg"
 # state_dir must be on a local filesystem, or the slot cap silently falls open.
 down_ttl_secs = 60
 
+# Keep one ssh connection per host open this long between jobs. A job then
+# opens a channel instead of paying a full handshake. 0 spawns a fresh ssh
+# every time.
+# ssh_persist_secs = 300
+
+# Where the control sockets go. Defaults to $XDG_RUNTIME_DIR/rffmpeg, else
+# /dev/shm/rrffmpeg-<uid>: tmpfs, so a reboot leaves no stale socket.
+# ssh_socket_dir = "/run/user/1000/rffmpeg"
+
 # Clients that share a worker must share this state_dir, and must not share a
 # client_name. Defaults to the hostname.
 # client_name = "client"

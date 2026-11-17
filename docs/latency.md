@@ -85,6 +85,27 @@ part is about 8 round trips. The agent spawns no
 client process for a job. It opens two TLS connections to a daemon that already
 runs, control and stdin, and a probe costs 3 round trips, the same as a job.
 
+## SSH connection persistence
+
+The SSH rows above spawn one `ssh` per job. `ssh_persist_secs` keeps one
+connection per host open instead, so a job opens a channel on it. Same shell
+harness, real binaries, N=30 with `ssh_persist_secs = 0` and N=60 with the
+default 300, against an sshd on `127.0.0.2`:
+
+```text
+SSH, persistence off   p50 155.60 ms  p99 173.55 ms
+SSH, persistence 300   p50  37.94 ms  p99  46.94 ms
+agent                  p50  30.95 ms  p99  33.92 ms
+```
+
+On a LAN, SSH with persistence lands 7 ms from the agent and inside the 50 ms
+budget. The sockets live on tmpfs, `$XDG_RUNTIME_DIR/rffmpeg` or
+`/dev/shm/rrffmpeg-<uid>`, mode 0700. The location does not change the
+latency: 37.96 ms p50 from the runtime directory against 38.00 ms from an ext4
+path, both N=60. It buys hygiene, since a reboot empties the directory. A stale
+socket is a fallback, not a failure: `ControlMaster=auto` opens a new
+connection when the master is gone. ADR 0014 records the choice.
+
 ## Network round trip
 
 Loopback has no latency, so this section adds some. The agent rows use `netem`

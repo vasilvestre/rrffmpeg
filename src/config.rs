@@ -31,6 +31,12 @@ fn default_down_ttl() -> u64 {
     60
 }
 
+/// Keep the ssh connection to a host open this long between jobs. 300 matches
+/// rffmpeg, so a job opens a channel instead of paying a handshake.
+fn default_ssh_persist() -> u64 {
+    300
+}
+
 fn default_ssh() -> PathBuf {
     PathBuf::from("ssh")
 }
@@ -117,6 +123,14 @@ pub struct Config {
     pub state_dir: PathBuf,
     #[serde(default = "default_ssh")]
     pub ssh_bin: PathBuf,
+    /// Seconds to keep one ssh connection per host open between jobs. Zero
+    /// spawns a fresh ssh, and pays the handshake every time.
+    #[serde(default = "default_ssh_persist")]
+    pub ssh_persist_secs: u64,
+    /// Where the control sockets go. Defaults to a tmpfs location, see
+    /// `docs/latency.md`. Only used when `ssh_persist_secs` is above zero.
+    #[serde(default)]
+    pub ssh_socket_dir: Option<PathBuf>,
     /// Shared secret of the agent daemon. `RRFFMPEG_AGENT_TOKEN` wins.
     #[serde(default)]
     pub agent_token: Option<String>,
@@ -152,6 +166,8 @@ impl Default for Config {
             stderr_as_stdout: false,
             state_dir: default_state_dir(),
             ssh_bin: default_ssh(),
+            ssh_persist_secs: default_ssh_persist(),
+            ssh_socket_dir: None,
             agent_token: None,
             agent_cert: None,
             local_ffmpeg: default_ffmpeg(),
@@ -232,6 +248,21 @@ to = "/home/bob/media"
         let cfg = Config::from_toml("[[hosts]]\nname = \"w\"\n").unwrap();
         assert_eq!(cfg.hosts[0].concurrency, 1);
         assert!(cfg.hosts[0].capabilities.is_empty());
+    }
+
+    #[test]
+    fn ssh_persistence_defaults_on_and_can_be_turned_off() {
+        let cfg = Config::from_toml("").unwrap();
+        assert_eq!(cfg.ssh_persist_secs, 300);
+        assert_eq!(cfg.ssh_socket_dir, None);
+        let off = Config::from_toml("ssh_persist_secs = 0").unwrap();
+        assert_eq!(off.ssh_persist_secs, 0);
+        let pinned =
+            Config::from_toml("ssh_socket_dir = \"/run/user/1000/rffmpeg\"").unwrap();
+        assert_eq!(
+            pinned.ssh_socket_dir,
+            Some(PathBuf::from("/run/user/1000/rffmpeg"))
+        );
     }
 
     #[test]

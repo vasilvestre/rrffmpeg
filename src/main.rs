@@ -9,15 +9,23 @@ use rrffmpeg::janitor::Janitor;
 use rrffmpeg::locks::LockDir;
 use rrffmpeg::scheduler::Scheduler;
 use rrffmpeg::state::{Event, Journal};
-use rrffmpeg::transport::{Router, Ssh, Transport};
+use rrffmpeg::transport::{Persist, Router, Ssh, Transport};
 use rrffmpeg::{Error, Job, Program, Result, config::Config, paths};
 use std::ffi::OsString;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 fn main() {
+    // The guard must drop before `process::exit`, which skips destructors.
+    #[cfg(feature = "hotpath")]
+    let guard = hotpath::HotpathGuardBuilder::new("rrffmpeg")
+        .functions_limit(12)
+        .build();
+
     let code = match run() {
         Ok(code) => code,
         Err(e) => {
@@ -25,6 +33,10 @@ fn main() {
             127
         }
     };
+
+    #[cfg(feature = "hotpath")]
+    drop(guard);
+
     std::process::exit(code);
 }
 
@@ -62,7 +74,7 @@ fn run() -> Result<i32> {
         .with_client(config.client_name.clone(), config.client_weight),
     );
     let transport: Arc<dyn Transport> = Arc::new(Router {
-        ssh: Ssh::new(config.ssh_bin.clone()),
+        ssh: ssh_transport(&config)?,
         agent,
     });
     let _janitor = Janitor::spawn(
@@ -217,6 +229,57 @@ fn agent_client(config: &Config) -> Result<Option<rrffmpeg::agent::Agent>> {
             "the agent transport needs both agent_token and agent_cert".into(),
         )),
     }
+}
+
+/// SSH transport, with one persistent connection per host when configured.
+fn ssh_transport(config: &Config) -> Result<Ssh> {
+    let mut ssh = Ssh::new(config.ssh_bin.clone());
+    if config.ssh_persist_secs == 0 {
+        return Ok(ssh);
+    }
+    ssh.persist = Some(Persist {
+        dir: ssh_socket_dir(config)?,
+        secs: config.ssh_persist_secs,
+    });
+    Ok(ssh)
+}
+
+/// A control socket dies with the session, so it belongs on tmpfs. The session
+/// runtime directory wins, then `/dev/shm`, then `state_dir` for a box with
+/// neither. Each candidate is private: ssh trusts whoever can open the socket.
+fn ssh_socket_dir(config: &Config) -> Result<PathBuf> {
+    if let Some(dir) = &config.ssh_socket_dir {
+        return private_dir(dir);
+    }
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
+        return private_dir(&PathBuf::from(runtime).join("rrffmpeg"));
+    }
+    let uid = std::fs::metadata("/proc/self")
+        .map(|m| m.uid())
+        .unwrap_or(0);
+    private_dir(&PathBuf::from(format!("/dev/shm/rrffmpeg-{uid}")))
+        .or_else(|_| private_dir(&config.state_dir.join("ssh")))
+}
+
+fn private_dir(dir: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| Error::Io(e, format!("creating {}", dir.display())))?;
+    // Refuse a symlink or a directory someone else owns: another local user
+    // could otherwise plant a name we then trust.
+    let meta = std::fs::symlink_metadata(dir)
+        .map_err(|e| Error::Io(e, format!("stat {}", dir.display())))?;
+    let uid = std::fs::metadata("/proc/self")
+        .map(|m| m.uid())
+        .unwrap_or(0);
+    if !meta.is_dir() || meta.uid() != uid {
+        return Err(Error::Config(format!(
+            "{} is not a directory this user owns",
+            dir.display()
+        )));
+    }
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| Error::Io(e, format!("setting mode on {}", dir.display())))?;
+    Ok(dir.to_path_buf())
 }
 
 /// The encoder in the arguments tells us which worker can run the job.

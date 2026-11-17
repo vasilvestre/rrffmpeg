@@ -29,6 +29,16 @@ pub struct Ssh {
     /// Remote directory for per-job pid files.
     pub pid_dir: String,
     pub timeout: Duration,
+    /// Keep one ssh connection per host open between jobs, so a job pays a
+    /// channel open instead of a full handshake. `None` spawns a fresh ssh.
+    pub persist: Option<Persist>,
+}
+
+/// `ControlMaster` settings. `dir` must exist; ssh creates the socket in it.
+#[derive(Debug, Clone)]
+pub struct Persist {
+    pub dir: PathBuf,
+    pub secs: u64,
 }
 
 impl Ssh {
@@ -37,12 +47,27 @@ impl Ssh {
             ssh_bin,
             pid_dir: "/tmp/rrffmpeg".into(),
             timeout: Duration::from_secs(5),
+            persist: None,
         }
     }
 
     /// Whole-second connect timeout, never zero: ssh rejects 0 there.
     fn connect_timeout(&self) -> String {
         self.timeout.as_secs().max(1).to_string()
+    }
+
+    fn persist_args(&self) -> Vec<String> {
+        let Some(p) = &self.persist else {
+            return Vec::new();
+        };
+        vec![
+            "-o".into(),
+            "ControlMaster=auto".into(),
+            "-o".into(),
+            format!("ControlPath={}/%C", p.dir.display()),
+            "-o".into(),
+            format!("ControlPersist={}", p.secs),
+        ]
     }
 
     /// `mkdir -p ... && echo $$ > <pid> && exec <program> <args> [2>&1]`.
@@ -119,6 +144,7 @@ impl Transport for Ssh {
             .arg("-T")
             .arg("-o")
             .arg("ServerAliveInterval=15")
+            .args(self.persist_args())
             // `--` closes the option list: the destination comes next, then
             // the remote command. Putting it after the host would make ssh
             // pass a literal `--` as the first word of the remote command.
@@ -150,6 +176,7 @@ impl Transport for Ssh {
             .arg("BatchMode=yes")
             .arg("-o")
             .arg(format!("ConnectTimeout={}", self.connect_timeout()))
+            .args(self.persist_args())
             .arg("--")
             .arg(&host.name)
             .arg(probe_command(host))
@@ -168,6 +195,7 @@ impl Transport for Ssh {
             .arg("BatchMode=yes")
             .arg("-o")
             .arg(format!("ConnectTimeout={}", self.connect_timeout()))
+            .args(self.persist_args())
             .arg("--")
             .arg(&host.name)
             .arg(&check)
@@ -195,6 +223,7 @@ impl Router {
 }
 
 impl Transport for Router {
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn run(&self, host: &Host, job: &Job, stderr_as_stdout: bool) -> Result<i32> {
         match host.agent_addr {
             Some(_) => self.agent(host)?.run(host, job, stderr_as_stdout),
@@ -303,6 +332,7 @@ mod tests {
                 .expect("utf-8 temp path")
                 .to_string(),
             timeout: Duration::from_secs(5),
+            persist: None,
         }
     }
 
@@ -405,6 +435,44 @@ mod tests {
         assert_eq!(v.len(), 6);
         assert!(v[5].starts_with("mkdir -p "));
         assert!(v[5].contains("job1.pid"));
+    }
+
+    #[test]
+    fn persistence_is_three_ssh_options_before_the_host() {
+        let dir = fixture("persist");
+        let _serial = crate::exclusive();
+        let argv = dir.join("argv");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        executable(&bin.join("ffmpeg"), "#!/bin/sh\nexit 0\n");
+        let mut s = ssh(fake_exec_ssh(&dir, &argv, &bin), &dir);
+        s.persist = Some(Persist {
+            dir: dir.join("sock"),
+            secs: 300,
+        });
+
+        s.run(&host(), &job(&[]), false).expect("run");
+
+        let v = recorded(&argv);
+        let at = v
+            .iter()
+            .position(|a| a == "ControlMaster=auto")
+            .expect("ControlMaster option");
+        assert_eq!(v[at - 1], "-o");
+        assert_eq!(v[at + 1], "-o");
+        assert!(v[at + 2].starts_with("ControlPath="));
+        assert_eq!(v[at + 3], "-o");
+        assert_eq!(v[at + 4], "ControlPersist=300");
+        let host_at = v.iter().position(|a| a == "--").expect("--");
+        assert!(at < host_at, "options must precede the host");
+
+        let probe_argv = dir.join("probe-argv");
+        let mut probing = ssh(fake_exit_ssh(&dir, &probe_argv, 0), &dir);
+        probing.persist = s.persist.clone();
+        assert!(probing.probe(&host()));
+        assert!(recorded(&probe_argv)
+            .iter()
+            .any(|a| a == "ControlMaster=auto"));
     }
 
     #[test]

@@ -189,7 +189,7 @@ daemon on the worker.
 |---|---|---|
 | The box has the GPU | no `[[hosts]]` | Local mode: no state, no thread, no disk |
 | Client without a GPU, LAN, a few jobs per hour | SSH | Nothing to install, and the cost is invisible at that rate |
-| Client that sends bursts of short calls | Agent | Every Jellyfin startup probe is one SSH handshake otherwise |
+| Client that sends bursts of short calls | Agent, or SSH with persistence | One TLS round trip, and no ssh process per call; persistence closes most of the SSH gap |
 | Link with high latency or loss | Agent | One round trip for TLS 1.3, against several for SSH key exchange and auth |
 | Worker with no inbound reachability | SSH | The agent needs a listening port on the worker |
 | Worker that cannot keep a daemon running | SSH | Nothing to supervise on the worker |
@@ -211,8 +211,11 @@ Rules that apply once a worker is configured:
    probe carries no capability, so with several workers it may land on one
    that cannot encode. With a single worker it does not matter.
 4. Measure before you add the agent. Time `ffprobe -version` through the
-   dispatcher a few hundred times. If p99 is under 50 ms, SSH is enough and
-   the daemon is complexity you do not need yet.
+   dispatcher a few hundred times. SSH keeps one connection per host open for
+   `ssh_persist_secs` (300 by default), so a job opens a channel instead of
+   paying a handshake: 37.9 ms p50 on loopback, against 155.6 ms with
+   persistence off. If p99 is under 50 ms, SSH is enough and the daemon is
+   complexity you do not need yet. `docs/latency.md` has the runs.
 5. Give every client that shares a worker the same `state_dir`, and a distinct
    `client_name`. The slot cap and the queue both live there, so a client with
    its own private `state_dir` sees a worker that is always free and a weight

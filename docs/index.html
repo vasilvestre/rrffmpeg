@@ -208,6 +208,8 @@ relayed byte count per job on the agent path.</p>
     <tr><td><code>down_ttl_secs</code></td><td><code>60</code></td><td>How long one process's "host down" verdict is trusted by the others. Expiry is the repair mechanism.</td></tr>
     <tr><td><code>stderr_as_stdout</code></td><td><code>false</code></td><td>Copy ffmpeg stderr to stdout, for Jellyfin builds that read probe output there.</td></tr>
     <tr><td><code>ssh_bin</code></td><td><code>ssh</code></td><td>SSH client used for hosts without <code>agent_addr</code>.</td></tr>
+    <tr><td><code>ssh_persist_secs</code></td><td><code>300</code></td><td>Keep one ssh connection per host open this long between jobs, so a job opens a channel instead of paying a handshake. Zero spawns a fresh ssh every time.</td></tr>
+    <tr><td><code>ssh_socket_dir</code></td><td><code>$XDG_RUNTIME_DIR/rffmpeg</code>, else <code>/dev/shm/rrffmpeg-&lt;uid&gt;</code></td><td>Where the persistent ssh control sockets go. Must be a directory owned by the running user. The default is tmpfs, so a reboot cannot leave a stale socket.</td></tr>
     <tr><td><code>agent_token</code></td><td>none</td><td>Shared secret of the agent daemon. <code>RRFFMPEG_AGENT_TOKEN</code> wins over it. Required if any host sets <code>agent_addr</code>.</td></tr>
     <tr><td><code>agent_cert</code></td><td>none</td><td>PEM of the daemon certificate, the only trust anchor for the agent transport. Required with <code>agent_token</code> if any host sets <code>agent_addr</code>.</td></tr>
     <tr><td><code>local_ffmpeg</code></td><td><code>ffmpeg</code></td><td>Binary used when a job runs locally. Point it away from the symlink or you loop.</td></tr>
@@ -243,7 +245,9 @@ is enough.</p>
 
 <p>Measured on one loopback box with ffmpeg 8.0.1: a full dispatch at p99 is
 32.95 ms, of which ffmpeg is 27.8 ms, the dispatcher 3.8 ms and the TLS
-transport 0.4 ms. A journal of 3000 records adds 1.3 ms to every dispatch, so
+transport 0.4 ms. Over SSH with connection persistence the same dispatch is
+37.94 ms p50 and 46.94 ms p99; with persistence off it is 155.60 ms p50.
+A journal of 3000 records adds 1.3 ms to every dispatch, so
 keep <code>state_dir</code> on a fast filesystem. The harness and the raw runs
 live in <code>docs/latency.md</code>.</p>
 
