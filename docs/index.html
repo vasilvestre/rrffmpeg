@@ -126,8 +126,11 @@ people running it have no maintained dispatcher.</p>
   worker. Or run the small <code>rrffmpeg-agent</code> daemon and skip the
   per-job handshake and probe. The scheduler does not know which one a host
   uses.</li>
-  <li><b>Priority as a hint.</b> Probes poll for a slot faster than transcodes.
-  The poll is not a queue, so order is best effort, agent or not.</li>
+  <li><b>Priority, then weight, across processes.</b> A waiting job publishes a
+  ticket and takes a slot only when no better ticket waits: a probe before a
+  transcode, then the client with the smaller share of recent starts per
+  <code>client_weight</code>. Two clients share a busy worker in the ratio of
+  their weights, and a client alone still takes every slot.</li>
 </ul>
 
 <h2>Install</h2>
@@ -259,6 +262,11 @@ separately: media and the HLS tmpfs are usually two different mounts.</p>
 <pre><code>state_dir = "/home/alice/.local/state/rrffmpeg"
 down_ttl_secs = 60
 
+# Every client sharing this state_dir must use a different name.
+# client_name = "client"
+# Share of a busy worker, 1 to 1000. Only counts while two clients wait.
+# client_weight = 100
+
 # Only needed when a host sets agent_addr.
 # agent_token = "change-me"
 # agent_cert = "/home/alice/.config/rrffmpeg/worker-cert.pem"
@@ -285,9 +293,9 @@ to = "/home/bob/transcode"</code></pre>
 
 <p>Working today: passthrough verified against real ffmpeg 8.0.1, one worker
 over SSH, an agent transport, path mapping both ways, journal plus janitor,
-per-host cap, capability match. Not yet: requeue after a dead client (the
-agent kills the orphan instead), priority ordering across processes,
-recorded-invocation replay.</p>
+per-host cap, capability match, priority and per-client weight across
+processes. Not yet: requeue after a dead client (the agent kills the orphan
+instead), recorded-invocation replay.</p>
 
 <p>Design choices and their costs are written down in the
 <a href="adr/">decision records</a>.</p>

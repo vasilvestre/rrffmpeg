@@ -87,8 +87,11 @@ cost.
 - **Explicit state with reconciliation.** A janitor thread re-tests unhealthy
   hosts, reaps orphan processes, and requeues jobs when a worker disappears.
   The state model is the opposite of "newest row wins".
-- **Priority as a hint.** Probes poll for a slot faster than transcodes. The
-  poll is not a queue, so order is best effort, with or without the agent.
+- **Priority, then weight, across processes.** A waiting job publishes a
+  ticket under `state_dir/coord/<host>/queue/` and declines any slot a better
+  ticket is waiting for. A probe outranks a transcode, and a client with
+  `client_weight = 400` starts four times as often as one at 100 while both
+  wait. A client alone still takes every slot. ADR 0012.
 - **Capability-aware placement.** Workers advertise VAAPI/NVENC/QSV and their
   concurrency limit. The scheduler matches, instead of a global weight. The
   limit is enforced by one exclusive lock file per slot, freed by the kernel
@@ -116,9 +119,11 @@ Ship the smallest thing that is strictly better than rffmpeg. State today:
 - [x] Per-host concurrency cap and capability matching. The cap holds across
   processes with `flock` slot files under `state_dir/coord/`, and the
   host-down verdict is shared with an expiry.
-- [ ] Priority across processes. A job polls for a slot with backoff and a
-  probe polls faster, but the poll is not a queue, so order is not guaranteed
-  even with the agent.
+- [x] Priority across processes, and a weight per client. A waiter publishes a
+  ticket per eligible host and takes a slot only when no better ticket waits:
+  class first, so a probe beats a transcode, then `starts / client_weight`, so
+  two clients share a busy worker in the ratio of their weights. Both need
+  every client to point at the same `state_dir`. ADR 0012.
 - [ ] No commit and no replay of production invocations yet. `docs/replay.md`
   explains how to record them on the client.
 
@@ -204,10 +209,20 @@ Rules that apply once a worker is configured:
 4. Measure before you add the agent. Time `ffprobe -version` through the
    dispatcher a few hundred times. If p99 is under 50 ms, SSH is enough and
    the daemon is complexity you do not need yet.
+5. Give every client that shares a worker the same `state_dir`, and a distinct
+   `client_name`. The slot cap and the queue both live there, so a client with
+   its own private `state_dir` sees a worker that is always free and a weight
+   that means nothing. `client_weight` only applies while two clients wait:
+   alone, a client keeps taking every slot.
+
+```toml
+client_name = "client"
+client_weight = 400   # 1 to 1000, same scale as the kernel's IO weight
+```
 
 ## Later
 
-- Priority and capability-aware placement.
+- Capability-aware placement that reads more than encoder flags.
 - Multi-worker balancing.
 - A replay harness that records real Jellyfin invocations and replays them, so
   "stability" can be measured instead of felt.
