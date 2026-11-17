@@ -26,6 +26,10 @@ folder of `main`. Treat it like the decision records: a change that adds or
 alters a config key, a feature or the project status updates the page in the
 same change. Keep its install commands and its status section true to the code.
 
+`docs/llms.txt` is the same, for machines: it lists the docs, the records and
+the example config. Add or drop an entry in the same change that adds or
+renames a doc or an ADR.
+
 Layout: `src/main.rs` wires the dispatch, `config.rs` reads TOML, `paths.rs`
 maps client to worker roots, `transport.rs` picks SSH or the agent per host,
 `agent.rs` is the agent protocol and daemon, `state.rs` is the WAL and its

@@ -1,0 +1,34 @@
+# rrffmpeg
+
+> Remote FFmpeg wrapper in Rust. It stands in for `ffmpeg` inside Jellyfin and sends each transcode to the machine that has the GPU, over SSH or through its own agent. Arguments pass through unchanged. It only dispatches: no encoding, remuxing or quality logic.
+
+Update this file in the same change as any doc, config key or feature it lists.
+Each entry points at raw Markdown so a reader gets plain text.
+
+## Docs
+
+- [README](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/README.md): what the project is, why it exists, the measured defects it fixes, install and configuration.
+- [Project page](https://vasilvestre.github.io/rrfmpeg/): the same pitch as HTML, plus the current status section.
+- [Measured dispatch latency](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/latency.md): how much the dispatcher adds to a transcode start, with the commands to repeat the measurement.
+- [Replay harness](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/replay.md): records real Jellyfin invocations and replays them through `rrffmpeg` to catch argument, quoting, stream wiring and exit code regressions.
+- [Example config](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/config.example.toml): a working pair of client and worker hosts.
+
+## Architecture decision records
+
+- [ADR index](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/adr/README.md): the table of decisions and their status.
+- [0001 Stand in for ffmpeg](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/adr/0001-stand-in-for-ffmpeg.md): exact argument passthrough.
+- [0002 Journal off the critical path](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/adr/0002-journal-off-the-critical-path.md): append-only journal and background flusher.
+- [0003 In-process janitor](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/adr/0003-in-process-janitor.md): repair in process, no cron watchdog.
+- [0004 Prefix path mapping](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/adr/0004-prefix-path-mapping.md): longest-prefix mapping in both directions.
+- [0005 SSH transport](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/adr/0005-ssh-transport.md): SSH first, behind a trait.
+- [0008 Cross-process slots](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/adr/0008-cross-process-slots.md): slot files and an expiring down verdict.
+- [0009 Agent transport](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/adr/0009-agent-transport.md): the agent daemon as a second transport.
+- [0010 Agent TLS](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/adr/0010-agent-tls.md): one pinned certificate, one connection per direction.
+- [0011 Journal timings](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/adr/0011-journal-timings.md): timings in the journal, read back by `rrffmpeg-stats`.
+- [0012 Shared queue with client weight](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/adr/0012-shared-queue-with-client-weight.md): ticket queue orders starts.
+- [0013 Retry a job that never started](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/adr/0013-retry-a-job-that-never-started.md): move an unstarted job to another host.
+
+## Optional
+
+- [Source](https://github.com/vasilvestre/rrfmpeg): repository root, `src/` holds the dispatcher, `tests/` the replay and fidelity tests.
+- [AGENTS.md](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/AGENTS.md): build commands, deployment facts that break dispatchers, and the rules for contributing.
