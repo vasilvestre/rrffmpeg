@@ -26,6 +26,9 @@ use std::time::Duration;
 
 pub struct Janitor {
     stop_flag: Arc<AtomicBool>,
+    /// True while a cycle runs. A probe in flight can block for the whole ssh
+    /// timeout, so `stop` must not wait for it.
+    busy: Arc<AtomicBool>,
     /// Wakes the sleeper on `stop`, so a 1 hour interval does not hold up exit.
     wake: Arc<(Mutex<()>, Condvar)>,
     handle: Mutex<Option<JoinHandle<()>>>,
@@ -39,16 +42,27 @@ impl Janitor {
         every: Duration,
     ) -> Janitor {
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let busy = Arc::new(AtomicBool::new(false));
         let wake = Arc::new((Mutex::new(()), Condvar::new()));
 
         let thread_flag = Arc::clone(&stop_flag);
+        let thread_busy = Arc::clone(&busy);
         let thread_wake = Arc::clone(&wake);
         let handle = thread::Builder::new()
             .name("janitor".into())
             .spawn(move || {
                 let mut seen: HashSet<String> = HashSet::new();
                 let mut reaped: HashSet<String> = HashSet::new();
+                // Sleep first: a job shorter than `every` then never probes a
+                // host, and the first probe reaches a host at `every`, not at
+                // start. A down verdict from another process stays trusted
+                // until this process retests, which is well under `down_ttl`.
                 while !thread_flag.load(Ordering::Relaxed) {
+                    wait(&thread_flag, &thread_wake, every);
+                    if thread_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    thread_busy.store(true, Ordering::SeqCst);
                     cycle(
                         &scheduler,
                         &journal,
@@ -56,16 +70,14 @@ impl Janitor {
                         &mut seen,
                         &mut reaped,
                     );
-                    if thread_flag.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    wait(&thread_flag, &thread_wake, every);
+                    thread_busy.store(false, Ordering::SeqCst);
                 }
             })
             .ok();
 
         Janitor {
             stop_flag,
+            busy,
             wake,
             handle: Mutex::new(handle),
         }
@@ -78,6 +90,11 @@ impl Janitor {
             Ok(mut slot) => slot.take(),
             Err(poison) => poison.into_inner().take(),
         };
+        // Mid-cycle the thread may sit in a probe, which the ssh timeout
+        // bounds at seconds. Joining would hold the job's exit that long.
+        if self.busy.load(Ordering::SeqCst) {
+            return;
+        }
         if let Some(handle) = handle {
             let _ = handle.join();
         }
@@ -91,6 +108,7 @@ impl Drop for Janitor {
 }
 
 /// One pass: reap orphans, then retest hosts.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn cycle(
     scheduler: &Scheduler,
     journal: &Journal,

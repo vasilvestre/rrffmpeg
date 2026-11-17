@@ -20,7 +20,7 @@ use crate::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -81,7 +81,8 @@ enum Command {
     Stop,
 }
 
-/// Live state, rebuilt from the journal at open and kept current by `append`.
+/// Live state, current for this process, and rebuilt from the journal on the
+/// first read that needs it.
 #[derive(Default)]
 struct Live {
     /// job id to host. A Started with no Finished stays here: that is the
@@ -95,15 +96,20 @@ struct Live {
     seq: u64,
     /// Highest sequence number replayed, used to ignore duplicates.
     last_seq: u64,
+    /// The journal has been replayed into this state. Only `append` runs before
+    /// the janitor asks for the active jobs, and that read is what replays.
+    replayed: bool,
 }
 
 pub struct Journal {
+    dir: PathBuf,
     tx: Sender<Command>,
     live: Mutex<Live>,
     handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Journal {
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn open(dir: &Path) -> Result<Journal> {
         Self::open_inner(dir, SYNC_INTERVAL, ROTATE_BYTES)
     }
@@ -112,14 +118,17 @@ impl Journal {
         std::fs::create_dir_all(dir)
             .map_err(|e| Error::Io(e, format!("create {}", dir.display())))?;
 
-        let mut live = Live::default();
         let mut rotated = rotated_files(dir)?;
         rotated.sort_by_key(|(n, _)| *n);
-        for (_, path) in &rotated {
-            replay(path, &mut live)?;
-        }
         let path = dir.join(JOURNAL_NAME);
-        replay(&path, &mut live)?;
+
+        // Only the tail is read here. Replaying the whole file costs about
+        // 4 us/KB, so at the 8 MB rotation cap it would spend 30 ms of the
+        // dispatch budget on state the janitor needs and the dispatch does not.
+        let live = Live {
+            seq: last_seq_on_disk(&path, &rotated),
+            ..Live::default()
+        };
 
         let file = OpenOptions::new()
             .create(true)
@@ -150,14 +159,38 @@ impl Journal {
             .map_err(|e| Error::Io(e, "spawn journal flusher".into()))?;
 
         Ok(Journal {
+            dir: dir.to_path_buf(),
             tx,
             live: Mutex::new(live),
             handle: Mutex::new(Some(handle)),
         })
     }
 
+    /// Replay the journal into the in-memory state, once. The janitor is the
+    /// only reader, and it runs off the dispatch path, so the cost lands there.
+    fn ensure_replayed(&self) {
+        let mut live = lock(&self.live);
+        if live.replayed {
+            return;
+        }
+        let Ok(mut rotated) = rotated_files(&self.dir) else {
+            return;
+        };
+        rotated.sort_by_key(|(n, _)| *n);
+        for (_, path) in &rotated {
+            if replay(path, &mut live).is_err() {
+                return;
+            }
+        }
+        if replay(&self.dir.join(JOURNAL_NAME), &mut live).is_err() {
+            return;
+        }
+        live.replayed = true;
+    }
+
     /// Queue an event. Touches only memory and an unbounded channel: no file
     /// IO, no fsync, and no panic when the flusher has gone away.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn append(&self, event: Event) {
         let record = {
             let mut live = lock(&self.live);
@@ -175,14 +208,17 @@ impl Journal {
     }
 
     pub fn active_on(&self, host: &str) -> usize {
+        self.ensure_replayed();
         lock(&self.live).counts.get(host).copied().unwrap_or(0)
     }
 
     pub fn is_down(&self, host: &str) -> bool {
+        self.ensure_replayed();
         lock(&self.live).down.contains(host)
     }
 
     pub fn active_jobs(&self) -> Vec<(String, String)> {
+        self.ensure_replayed();
         lock(&self.live)
             .jobs
             .iter()
@@ -303,6 +339,49 @@ fn rotated_files(dir: &Path) -> Result<Vec<(u64, PathBuf)>> {
 
 /// Rebuild live state from one file. A bad line is reported and skipped: a
 /// truncated tail after a crash is expected, not fatal.
+/// Highest `seq` already on disk, from the tail of the active file, or of the
+/// newest rotated one when the active file holds no record yet.
+fn last_seq_on_disk(active: &Path, rotated: &[(u64, PathBuf)]) -> u64 {
+    let seq = tail_seq(active);
+    if seq > 0 {
+        return seq;
+    }
+    rotated
+        .iter()
+        .rev()
+        .map(|(_, path)| tail_seq(path))
+        .find(|seq| *seq > 0)
+        .unwrap_or(0)
+}
+
+/// The last complete record of one file, so a restart resumes the sequence
+/// without reading the whole journal. A truncated final line is skipped.
+fn tail_seq(path: &Path) -> u64 {
+    const TAIL: u64 = 8192;
+    let Ok(mut file) = File::open(path) else {
+        return 0;
+    };
+    let Ok(len) = file.metadata().map(|m| m.len()) else {
+        return 0;
+    };
+    if file
+        .seek(SeekFrom::Start(len.saturating_sub(TAIL)))
+        .is_err()
+    {
+        return 0;
+    }
+    let mut buf = Vec::new();
+    if file.take(TAIL).read_to_end(&mut buf).is_err() {
+        return 0;
+    }
+    String::from_utf8_lossy(&buf)
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str::<Record>(line).ok())
+        .map(|record| record.seq)
+        .unwrap_or(0)
+}
+
 fn replay(path: &Path, live: &mut Live) -> Result<()> {
     let file = match File::open(path) {
         Ok(file) => file,

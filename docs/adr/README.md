@@ -24,5 +24,6 @@ ADR-NNNN` and add the new record.
 | [0012](0012-shared-queue-with-client-weight.md) | A shared ticket queue orders starts, with a weight per client | Accepted |
 | [0013](0013-retry-a-job-that-never-started.md) | Retry a job that never started on another host | Accepted |
 | [0014](0014-ssh-connection-persistence.md) | Keep the SSH connection open between jobs | Accepted |
+| [0015](0015-replay-waits-for-the-janitor.md) | Replay the journal only when the janitor reads it | Accepted |
 
 All records dated 2026-11-17.

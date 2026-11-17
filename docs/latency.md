@@ -284,10 +284,41 @@ median 34.732 ms, 0.420 us per record
 At the cap a replay costs 34.732 ms median, and it sits on the critical path,
 between deciding to run and running ffmpeg. That is most of the 50 ms budget for
 bookkeeping alone. The five runs fall as the page cache warms, from 36.820 ms
-to 33.821 ms, and settle at 0.420 us per record. The fix is the one ADR 0002
-describes: keep the replay off the critical path. Until then, keep the journal
-small: the cap costs about 50 ms per dispatch on any filesystem, which is the
-whole budget.
+to 33.821 ms, and settle at 0.420 us per record. That is most of a 50 ms
+budget for bookkeeping alone. ADR 0015 takes it off the critical path; the
+numbers below are the before and after.
+
+
+## Journal replay moved off the dispatch path
+
+The first version replayed the whole journal inside `Journal::open`, before the
+job was placed. Each file is capped at 8 MB and nothing caps the number of
+files, so the cost grew with everything on disk. ADR 0015 moved the replay to
+the janitor's first read. Same machine, 60 jobs per size, `elapsed_us` read
+back from the journal, transport `/bin/true`:
+
+| Journal on disk | Before p50 | Before p99 | After p50 | After p99 |
+|---|---|---|---|---|
+| empty | 180 us | 208 us | 130 us | 183 us |
+| 1 MB active file | 4.3 ms | 5.3 ms | 134 us | 192 us |
+| 4 MB active file | 16.3 ms | 18.6 ms | 134 us | 203 us |
+| 8 MB active file | 32.6 ms | 34.0 ms | 133 us | 196 us |
+| 32 MB in four rotated files | 113.1 ms | 117.8 ms | 132 us | 265 us |
+
+A separate run shows the cost the janitor probe put on exit. A fake `ssh` that
+sleeps 3 s on the probe and returns at once for the job: the job's wall clock
+was 3.03 s before, 0.00 s after.
+
+```bash
+cargo build --release --features hotpath
+HOTPATH_OUTPUT_PATH=/tmp/report.txt RRFFMPEG_CONFIG=./config.toml \
+  ./target/release/rrffmpeg -version
+cat /tmp/report.txt
+```
+
+With an 8 MB active file, `state::open` was 62.3 ms of a 62.9 ms run before,
+and 45 us of a 0.68 ms run after. The report adds its own overhead, so compare
+those two rows to each other, not to the table above.
 
 ## State directory: disk against tmpfs
 

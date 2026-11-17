@@ -66,6 +66,7 @@ impl Scheduler {
 
     /// Reserve a slot on the eligible host with the lowest running/concurrency
     /// ratio, first in config order on ties.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn acquire(&self, job: &Job) -> Option<Lease> {
         for _ in 0..ACQUIRE_PASSES {
             let index = self.pick_host(job.capability.as_deref())?;
