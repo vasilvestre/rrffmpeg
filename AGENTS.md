@@ -63,6 +63,23 @@ placeholders, not the real ones.
 - No priority, no per-host concurrency cap, no capability detection, no path
   mapping, no retry, a per-job SSH health probe.
 
+## Decision records
+
+Every decision that shapes the code gets a record in `docs/adr/`. The index is
+`docs/adr/README.md`; read the records before you change a design choice.
+
+- Write one file per decision, numbered `NNNN-short-title.md`.
+- Use four sections: Context, Decision, Consequences, Alternatives rejected.
+  State the cost of the choice, not only its benefit.
+- Date the record. All records use `Status: Accepted`.
+- Supersede a decision with a new record. Do not rewrite an accepted one: set
+  its status to `Superseded by ADR-NNNN` and link the new one.
+- Add a row to the index table in the same change.
+- No real host name, user name, or absolute path from a real machine. The
+  public repository rule applies to records too.
+- Record the measure behind a claim (`2 to 4 s`, `64 ms`), or say it is an
+  assumption.
+
 ## Deployment facts that break dispatchers
 
 - Jellyfin derives ffprobe from the ffmpeg path: `/usr/local/bin/ffmpeg` gives
@@ -110,6 +127,7 @@ dispatch p99 under 50 ms.
 - dffmpeg (the job model to borrow): https://github.com/brwyatt/dffmpeg
 - The production setup and its failure modes: `~/homelab/docs/rffmpeg.md`
   and its changelog.
+- Why the code looks like this: `docs/adr/` (decision records and index).
 
 ## Style
 

@@ -72,7 +72,9 @@ transcodes to a worker (called `worker`, Intel N100 with VAAPI), see the
 
 ## Design
 
-Single Rust binary, used as Jellyfin's `ffmpeg` replacement.
+Single Rust binary, used as Jellyfin's `ffmpeg` replacement. Each decision below
+has a short record in [`docs/adr/`](docs/adr/README.md): context, choice, and
+cost.
 
 - **Bookkeeping off the hot path.** Job state goes to an append-only WAL
   journal with a background flusher. The transcode starts immediately; the
