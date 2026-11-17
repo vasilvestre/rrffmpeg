@@ -1,12 +1,12 @@
 #!/bin/sh
 # Install or update rrffmpeg from the latest GitHub release.
 #
-#   sudo sh scripts/install.sh              # client: rrffmpeg, stats, symlinks
-#   sudo sh scripts/install.sh --agent      # worker: rrffmpeg-agent only
+#   sh scripts/install.sh               # client: rrffmpeg, stats, symlinks
+#   sh scripts/install.sh --agent       # worker: rrffmpeg-agent only
 #
-# The previous binary stays next to the new one as *.prev, so a rollback is a
-# rename. Override the destination with PREFIX, for example
-# PREFIX=$HOME/.local/bin sh scripts/install.sh.
+# The default prefix is /usr/local/bin, which needs root. The previous binary
+# stays next to the new one as *.prev, so a rollback is a rename.
+# Install as your own user with PREFIX=$HOME/.local/bin sh scripts/install.sh.
 set -eu
 
 owner=vasilvestre
@@ -21,6 +21,13 @@ for arg in "$@"; do
     *) echo "install.sh: unknown option $arg" >&2; exit 2 ;;
   esac
 done
+
+# Checked before the download, so a non-root run fails in a second, not after it.
+if ! mkdir -p "$prefix" 2>/dev/null || [ ! -w "$prefix" ]; then
+  echo "install.sh: cannot write $prefix" >&2
+  echo "install.sh: rerun with sudo, or set PREFIX, for example PREFIX=\$HOME/.local/bin" >&2
+  exit 1
+fi
 
 case $(uname -m) in
   x86_64) target=x86_64-unknown-linux-musl ;;
@@ -42,11 +49,6 @@ tar xzf "$tmp/$name.tar.gz" -C "$tmp"
 src="$tmp/$name"
 
 install_one() {
-  if ! mkdir -p "$prefix" 2>/dev/null || [ ! -w "$prefix" ]; then
-    echo "install.sh: cannot write $prefix" >&2
-    echo "install.sh: rerun with sudo, or set PREFIX, for example PREFIX=\$HOME/.local/bin" >&2
-    exit 1
-  fi
   # install unlinks first, so a job running on the old inode is not cut.
   if [ -f "$prefix/$1" ]; then cp -f "$prefix/$1" "$prefix/$1.prev"; fi
   install -m 755 "$src/$1" "$prefix/$1"
