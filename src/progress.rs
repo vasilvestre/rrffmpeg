@@ -313,7 +313,11 @@ mod tests {
 
     #[test]
     fn the_last_stats_line_wins() {
-        let stats = parsed(&[STATS, STATS, "frame=2 fps=30 speed=1.40x bitrate=1006.2kbits/s\r"]);
+        let stats = parsed(&[
+            STATS,
+            STATS,
+            "frame=2 fps=30 speed=1.40x bitrate=1006.2kbits/s\r",
+        ]);
         assert_eq!(stats.fps, Some(30.0));
         assert_eq!(stats.speed, Some(1.40));
         assert_eq!(stats.kbps, Some(1006.2));
@@ -321,7 +325,11 @@ mod tests {
 
     #[test]
     fn a_line_split_across_chunks_still_parses() {
-        let stats = parsed(&["frame=1 fps=2", "3.5 q=0 speed=1.1", "0x bitrate=900kbits/s\r"]);
+        let stats = parsed(&[
+            "frame=1 fps=2",
+            "3.5 q=0 speed=1.1",
+            "0x bitrate=900kbits/s\r",
+        ]);
         assert_eq!(stats.fps, Some(23.5));
         assert_eq!(stats.speed, Some(1.10));
     }

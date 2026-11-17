@@ -104,7 +104,9 @@ impl Summary {
                     let tally = summary.hosts.entry(host.clone()).or_default();
                     tally.jobs += 1;
                 }
-                Event::Finished { job, code, stats, .. } => {
+                Event::Finished {
+                    job, code, stats, ..
+                } => {
                     let Some(&slot) = index.get(job) else {
                         continue;
                     };
@@ -459,6 +461,10 @@ mod tests {
         assert!(report.contains("1.24x"), "{report}");
         assert!(report.contains("1080p hevc"), "{report}");
         assert!(report.contains("video encode"), "{report}");
-        assert!(summary.json().contains("\"p50\":1240"), "{}", summary.json());
+        assert!(
+            summary.json().contains("\"p50\":1240"),
+            "{}",
+            summary.json()
+        );
     }
 }
