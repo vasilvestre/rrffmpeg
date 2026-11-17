@@ -123,7 +123,7 @@ and four SQLite commits. Its per-job health probe then opens a second SSH
 connection and starts ffmpeg twice, which is why a 24 ms probe becomes 117 ms.
 On the shared disk of the production box the same commit waited 2 to 4 seconds.
 The method, the raw runs and the rffmpeg config are in
-<a href="compare-rffmpeg.md">compare-rffmpeg.md</a>.</p>
+<a href="https://github.com/vasilvestre/rrffmpeg/blob/main/docs/compare-rffmpeg.md">compare-rffmpeg.md</a>.</p>
 
 <h2>Features</h2>
 
@@ -175,6 +175,17 @@ and keeps the previous binary as <code>rrffmpeg.prev</code> for a rollback. Run
 the same command to update. On a worker that uses the agent transport, add
 <code>-s -- --agent</code> to install the daemon only.</p>
 
+<p>No root is required. <code>sudo</code> is there only to write the default
+<code>/usr/local/bin</code>. Set <code>PREFIX</code> to install into a directory
+you own, then point Jellyfin at <code>$PREFIX/ffmpeg</code>:</p>
+
+<pre><code>curl -fsSL https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/scripts/install.sh | PREFIX=$HOME/.local/bin sh</code></pre>
+
+<p>The user that runs Jellyfin must be able to read and execute that path. Many
+distros set <code>ProtectHome=true</code> on the Jellyfin unit, which hides every
+home directory, so a shared path such as <code>/opt/rrffmpeg/bin</code> is the
+safer choice.</p>
+
 <p><code>--version</code> answers only under the <code>rrffmpeg</code> name, so
 the <code>ffmpeg</code> symlink keeps forwarding <code>-version</code> to the
 real ffmpeg.</p>
@@ -214,7 +225,8 @@ client to the daemon, and a stolen token still works from any host that
 reaches the address, so keep the listener on a private network until mTLS
 exists.</p>
 
-<p>Point Jellyfin at <code>/usr/local/bin/ffmpeg</code>. Without a config file
+<p>Point Jellyfin at <code>/usr/local/bin/ffmpeg</code>, or at
+<code>$PREFIX/ffmpeg</code> when you used a custom prefix. Without a config file
 the binary runs the local ffmpeg and does nothing else, so the install is safe
 before the worker exists.</p>
 
