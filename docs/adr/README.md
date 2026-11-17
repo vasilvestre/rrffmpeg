@@ -28,5 +28,8 @@ ADR-NNNN` and add the new record.
 | [0016](0016-verifiable-install-and-update.md) | A version output, a tag check, and one install script | Accepted |
 | [0017](0017-queue-decides-at-the-door.md) | The queue decides at the door, and passes free slots in a batch | Accepted |
 | [0018](0018-one-thread-relay-and-lazy-stdin.md) | One daemon thread relays a job, and the stdin connection opens on use | Accepted |
+| [0019](0019-refuse-the-local-fallback-for-ffmpeg.md) | Refuse the local fallback for a transcode, keep it for a probe | Accepted |
+| [0020](0020-ssh-arguments-in-config.md) | SSH arguments in the config, not in a wrapper script | Accepted |
+| [0021](0021-per-host-environment.md) | Per-host environment, and agent protocol 2 | Accepted |
 
 All records dated 2026-11-17.

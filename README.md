@@ -204,20 +204,30 @@ Rules that apply once a worker is configured:
    Put it on tmpfs only behind a shared or spinning disk. `docs/latency.md`
    gives the numbers.
 2. Never let a client without a GPU quietly transcode. After `queue_wait_secs`
-   without a worker slot the process runs the local binary, and there is no
-   switch to turn that off. Raise `queue_wait_secs`, and watch the log for
-   `rrffmpeg: no worker slot after`. On a shared box the fallback runs ffmpeg
-   at the lowest priority, on the wrong hardware, and can trip a memory cap.
-3. Capability matching only reads encoder flags. A `-version` or `-encoders`
+   without a worker slot the process runs the local binary, unless you set
+   `fallback_local = false`. Keep it false on a GPU-less client: an `ffmpeg`
+   job then exits 1 and logs `no worker slot after`, while an `ffprobe` still
+   falls back, because a local probe is cheap and Jellyfin needs it for
+   direct-play. On a shared box the fallback runs ffmpeg at the lowest priority,
+   on the wrong hardware, and can trip a memory cap.
+3. A per-host key belongs in `ssh_args`, not in a shell wrapper. The global
+   `ssh_args` list applies to every host, and a host's own list is appended, so
+   one worker can add `-i /home/alice/.ssh/worker` while the shared options are
+   written once. Both are inserted after the `ControlMaster` options and before
+   the host name, so persistence keeps working. `-o` options are allowed.
+4. A worker that needs variables around ffmpeg gets `[hosts.env]`, not a
+   wrapper script. Each value reaches the worker literally, so a space or a `$`
+   survives the remote shell. The agent transport carries the same map.
+5. Capability matching only reads encoder flags. A `-version` or `-encoders`
    probe carries no capability, so with several workers it may land on one
    that cannot encode. With a single worker it does not matter.
-4. Measure before you add the agent. Time `ffprobe -version` through the
+6. Measure before you add the agent. Time `ffprobe -version` through the
    dispatcher a few hundred times. SSH keeps one connection per host open for
    `ssh_persist_secs` (300 by default), so a job opens a channel instead of
    paying a handshake: 37.9 ms p50 on loopback, against 155.6 ms with
    persistence off. If p99 is under 50 ms, SSH is enough and the daemon is
    complexity you do not need yet. `docs/latency.md` has the runs.
-5. Give every client that shares a worker the same `state_dir`, and a distinct
+7. Give every client that shares a worker the same `state_dir`, and a distinct
    `client_name`. The slot cap and the queue both live there, so a client with
    its own private `state_dir` sees a worker that is always free and a weight
    that means nothing. `client_weight` only applies while two clients wait:
@@ -252,9 +262,10 @@ client_weight = 400   # 1 to 1000, same scale as the kernel's IO weight
   costs about 50 ms whatever the filesystem, which is the whole budget. That,
   not the disk, is what pushes people to tmpfs. Keep the journal small, or move
   the replay off the critical path.
-- **A full queue falls back to local execution.** The fallback always runs,
-  with no config switch, so a GPU-less client can end up transcoding on the
-  wrong hardware. See `Choosing a mode and a transport`.
+- **A forgotten fallback still encodes locally.** `fallback_local` defaults to
+  true so a v0.5.0 config keeps working, which means a GPU-less client that
+  never sets it false still transcodes on the wrong hardware after
+  `queue_wait_secs`. Set it false. See `Choosing a mode and a transport`.
 
 ## Evidence
 

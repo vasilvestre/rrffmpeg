@@ -35,6 +35,21 @@ down_ttl_secs = 60
 # /dev/shm/rrffmpeg-<uid>: tmpfs, so a reboot leaves no stale socket.
 # ssh_socket_dir = "/run/user/1000/rffmpeg"
 
+# Extra ssh arguments for every host, inserted after the ControlMaster options
+# and before the host name. Put a key here, or per host below; `-o` options are
+# allowed. They never replace the persistence options.
+# ssh_args = ["-o", "StrictHostKeyChecking=yes"]
+
+# Run the local binary when no worker slot frees up within queue_wait_secs.
+# Set it to false on a client without a GPU: a failed transcode beats encoding
+# in software on the wrong hardware. A local ffprobe still runs either way,
+# because it is cheap and Jellyfin needs it for direct-play decisions.
+# fallback_local = true
+
+# Variables for the local binary, as a table of strings.
+# [local_env]
+# LD_LIBRARY_PATH = "/opt/intel/lib"
+
 # Clients that share a worker must share this state_dir, and must not share a
 # client_name. Defaults to the hostname.
 # client_name = "client"
@@ -53,6 +68,16 @@ capabilities = ["vaapi"]
 # Skip ssh for this host and talk to `rrffmpeg-agent` instead. Hosts without
 # this line keep using ssh, which needs nothing installed on the worker.
 # agent_addr = "worker:9876"
+
+# Extra ssh arguments for this host only, appended after the global list. This
+# is where a dedicated key goes, so the worker shim only has to set the env.
+# ssh_args = ["-i", "/home/alice/.ssh/worker"]
+
+# Variables the worker sets before it runs ffmpeg. They replace the wrapper
+# script that exported the OpenCL ICD and the library path by hand.
+# [hosts.env]
+# OCL_ICD_VENDORS = "/opt/intel/opencl"
+# LD_LIBRARY_PATH = "/opt/intel/lib"
 
 # Input: media mounted at a different root on the worker.
 # The probe checks every `to` root, so a dead mount marks the host down

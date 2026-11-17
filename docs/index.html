@@ -163,6 +163,10 @@ of tmpfs, the dispatch rises by 39 ms.</p>
   transcode, then the client with the smaller share of recent starts per
   <code>client_weight</code>. Two clients share a busy worker in the ratio of
   their weights, and a client alone still takes every slot.</li>
+  <li><b>No silent local fallback.</b> <code>fallback_local = false</code>
+  makes an ffmpeg job fail with exit 1 instead of encoding on a client with no
+  GPU. A local ffprobe still runs. Per-host <code>ssh_args</code> carry the key,
+  and per-host <code>env</code> replaces the worker wrapper script.</li>
 </ul>
 
 <h2>Install</h2>
@@ -255,11 +259,14 @@ relayed byte count per job on the agent path.</p>
     <tr><td><code>hosts</code></td><td><code>[]</code></td><td>Workers. Empty means every job runs locally.</td></tr>
     <tr><td><code>state_dir</code></td><td><code>~/.local/state/rrffmpeg</code></td><td>Journal, pid files and the coordinator slot files. Put it on a local filesystem; a slow disk adds latency to the journal replay each dispatch does, and a network mount breaks the slot cap silently.</td></tr>
     <tr><td><code>queue_wait_secs</code></td><td><code>600</code></td><td>How long a job waits for a free worker slot before running locally.</td></tr>
+    <tr><td><code>fallback_local</code></td><td><code>true</code></td><td>Run the local binary when no slot frees up. Set it to <code>false</code> on a client without a GPU: an ffmpeg job then exits 1 and logs the error, while an ffprobe still runs locally for direct-play.</td></tr>
+    <tr><td><code>local_env</code></td><td><code>{}</code></td><td>Variables set on the local binary, as a table of strings.</td></tr>
     <tr><td><code>down_ttl_secs</code></td><td><code>60</code></td><td>How long one process's "host down" verdict is trusted by the others. Expiry is the repair mechanism.</td></tr>
     <tr><td><code>stderr_as_stdout</code></td><td><code>false</code></td><td>Copy ffmpeg stderr to stdout, for Jellyfin builds that read probe output there.</td></tr>
     <tr><td><code>ssh_bin</code></td><td><code>ssh</code></td><td>SSH client used for hosts without <code>agent_addr</code>.</td></tr>
     <tr><td><code>ssh_persist_secs</code></td><td><code>300</code></td><td>Keep one ssh connection per host open this long between jobs, so a job opens a channel instead of paying a handshake. Zero spawns a fresh ssh every time.</td></tr>
     <tr><td><code>ssh_socket_dir</code></td><td><code>$XDG_RUNTIME_DIR/rffmpeg</code>, else <code>/dev/shm/rrffmpeg-&lt;uid&gt;</code></td><td>Where the persistent ssh control sockets go. Must be a directory owned by the running user. The default is tmpfs, so a reboot cannot leave a stale socket.</td></tr>
+    <tr><td><code>ssh_args</code></td><td><code>[]</code></td><td>Extra ssh arguments for every host, such as <code>-o</code> options. Inserted after the <code>ControlMaster</code> options and before the host name.</td></tr>
     <tr><td><code>agent_token</code></td><td>none</td><td>Shared secret of the agent daemon. <code>RRFFMPEG_AGENT_TOKEN</code> wins over it. Required if any host sets <code>agent_addr</code>.</td></tr>
     <tr><td><code>agent_cert</code></td><td>none</td><td>PEM of the daemon certificate, the only trust anchor for the agent transport. Required with <code>agent_token</code> if any host sets <code>agent_addr</code>.</td></tr>
     <tr><td><code>local_ffmpeg</code></td><td><code>ffmpeg</code></td><td>Binary used when a job runs locally. Point it away from the symlink or you loop.</td></tr>
@@ -279,6 +286,8 @@ relayed byte count per job on the agent path.</p>
     <tr><td><code>ffprobe_bin</code></td><td>inherited</td><td>ffprobe path on the worker.</td></tr>
     <tr><td><code>agent_addr</code></td><td>none</td><td><code>host:port</code> of <code>rrffmpeg-agent</code>. Set it to skip SSH for this host. Its host part must appear in the certificate.</td></tr>
     <tr><td><code>paths</code></td><td><code>[]</code></td><td>Path maps, see below.</td></tr>
+    <tr><td><code>ssh_args</code></td><td><code>[]</code></td><td>Extra ssh arguments for this host, appended after the top-level list. A dedicated key goes here: <code>["-i", "/home/alice/.ssh/worker"]</code>.</td></tr>
+    <tr><td><code>env</code></td><td><code>{}</code></td><td>Variables set on the worker for each job, as a table of strings. This replaces a wrapper script around ffmpeg.</td></tr>
   </tbody>
 </table>
 
@@ -303,9 +312,10 @@ live in <code>docs/latency.md</code>.</p>
 
 <p>Put <code>state_dir</code> on tmpfs when the disk is slow, because every
 invocation replays the journal before it dispatches. After
-<code>queue_wait_secs</code> without a free slot the job runs locally, and no
-switch prevents it, so a client without a GPU needs a generous value and a
-watch on the <code>no worker slot</code> log line.</p>
+<code>queue_wait_secs</code> without a free slot the job runs locally unless
+<code>fallback_local = false</code>, which refuses an ffmpeg job with exit 1
+and still allows a local ffprobe. A client without a GPU sets the switch and
+watches the <code>no worker slot</code> log line.</p>
 
 <h3>Path maps</h3>
 

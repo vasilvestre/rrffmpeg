@@ -95,6 +95,45 @@ fn probe_name_selects_ffprobe() {
 }
 
 #[test]
+fn a_forbidden_fallback_refuses_ffmpeg_but_still_runs_ffprobe() {
+    let dir = std::env::temp_dir().join(format!("rrffmpeg-nofallback-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("config.toml");
+    std::fs::write(&config, "fallback_local = false\n").unwrap();
+    let marker = dir.join("ran");
+    let bin = dir.join("stand-in");
+    std::fs::write(&bin, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    let mut perm = std::fs::metadata(&bin).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
+    std::fs::set_permissions(&bin, perm).unwrap();
+    let bin = bin.to_str().unwrap();
+
+    let out = run(
+        bin,
+        &["-i", "file:/m/x.mkv", "-c:v", "libx264"],
+        &[("RRFFMPEG_CONFIG", config.to_str().unwrap())],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(!marker.exists(), "ffmpeg must not run locally");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("fallback_local"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = run(
+        bin,
+        &["-v", "error", "-show_format", "file:/m/x.mkv"],
+        &[
+            ("RRFFMPEG_CONFIG", config.to_str().unwrap()),
+            ("RRFFMPEG_PROGRAM", "ffprobe"),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert!(marker.exists(), "a local probe still runs");
+}
+
+#[test]
 fn version_reports_the_build_before_the_config_loads() {
     // A config path that does not parse must not stand between the operator and
     // the answer "which build is this".

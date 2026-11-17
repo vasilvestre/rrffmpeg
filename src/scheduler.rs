@@ -273,6 +273,8 @@ mod tests {
             ffmpeg_bin: None,
             ffprobe_bin: None,
             agent_addr: None,
+            ssh_args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
             paths: Vec::new(),
         }
     }

@@ -123,11 +123,17 @@ This minimal file sends every job to one worker over SSH:
 state_dir = "/home/alice/.local/state/rrffmpeg"
 local_ffmpeg = "/usr/bin/ffmpeg"
 local_ffprobe = "/usr/bin/ffprobe"
+fallback_local = false
 
 [[hosts]]
 name = "worker"
 concurrency = 2
 capabilities = ["vaapi"]
+ssh_args = ["-i", "/home/alice/.ssh/worker"]
+
+[hosts.env]
+OCL_ICD_VENDORS = "/opt/intel/opencl"
+LD_LIBRARY_PATH = "/opt/intel/lib"
 
 [[hosts.paths]]
 from = "/home/alice"
@@ -142,8 +148,19 @@ to = "/home/bob/transcode"
 - `concurrency` is the number of jobs the worker accepts at once.
 - `capabilities` lists the accelerators the worker really has. Empty accepts any
   job, which is wrong for a GPU-less worker.
+- `ssh_args` holds the key and any `-o` option. A top-level `ssh_args` applies
+  to every host, and the host list is appended after it. Both go after the
+  `ControlMaster` options, so persistence keeps working.
+- `[hosts.env]` sets variables on the worker for each job. It replaces the
+  wrapper script that exported the OpenCL and library paths. Values reach the
+  worker literally, including spaces and `$`.
 - `[[hosts.paths]]` rewrites the input and the output roots. The longest
   matching `from` wins, in both directions.
+- `fallback_local = false` stops an `ffmpeg` job from running on the client
+  when no worker slot frees up: it exits 1 and logs `no worker slot after`.
+  An `ffprobe` still runs locally, because Jellyfin needs it for direct-play
+  and a local probe is cheap. Leave the default `true` only on a client that
+  has the GPU.
 
 Use SSH keys for the user that runs Jellyfin, so a transcode never waits on a
 password prompt:

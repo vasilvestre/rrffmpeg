@@ -32,6 +32,8 @@ pub struct Ssh {
     /// Keep one ssh connection per host open between jobs, so a job pays a
     /// channel open instead of a full handshake. `None` spawns a fresh ssh.
     pub persist: Option<Persist>,
+    /// Extra ssh arguments for every host, before each host's own.
+    pub ssh_args: Vec<String>,
 }
 
 /// `ControlMaster` settings. `dir` must exist; ssh creates the socket in it.
@@ -48,6 +50,7 @@ impl Ssh {
             pid_dir: "/tmp/rrffmpeg".into(),
             timeout: Duration::from_secs(5),
             persist: None,
+            ssh_args: Vec::new(),
         }
     }
 
@@ -70,6 +73,17 @@ impl Ssh {
         ]
     }
 
+    /// Options that belong after the `ControlMaster` set and before the host.
+    /// A host appends to the global list, so its key stays local while the
+    /// shared options are written once.
+    fn ssh_args(&self, host: &Host) -> Vec<String> {
+        self.ssh_args
+            .iter()
+            .chain(&host.ssh_args)
+            .cloned()
+            .collect()
+    }
+
     /// `mkdir -p ... && echo $$ > <pid> && exec <program> <args> [2>&1]`.
     ///
     /// `$$` is not quoted: the remote shell expands it before `exec` replaces
@@ -90,6 +104,18 @@ impl Ssh {
             words.push(arg);
         }
         let command: Vec<String> = words.iter().map(|w| shell_quote(w)).collect();
+        // `env` needs each assignment as one literal word: the remote shell
+        // must not expand a `$` or split a value that contains a space.
+        let env: Vec<String> = host
+            .env
+            .iter()
+            .map(|(k, v)| shell_quote(&format!("{k}={v}")))
+            .collect();
+        let cmd = if env.is_empty() {
+            command.join(" ")
+        } else {
+            format!("env {} {}", env.join(" "), command.join(" "))
+        };
 
         let pid_file = format!("{}/{}.pid", self.pid_dir, job.id);
         // A finished job leaves its pid file behind: removing it needs a second
@@ -100,7 +126,7 @@ impl Ssh {
             "mkdir -p {dir} && echo $$ > {pid} && exec {cmd}{redirect}",
             dir = shell_quote(&self.pid_dir),
             pid = shell_quote(&pid_file),
-            cmd = command.join(" "),
+            cmd = cmd,
             redirect = if stderr_as_stdout { " 2>&1" } else { "" },
         ))
     }
@@ -145,6 +171,7 @@ impl Transport for Ssh {
             .arg("-o")
             .arg("ServerAliveInterval=15")
             .args(self.persist_args())
+            .args(self.ssh_args(host))
             // `--` closes the option list: the destination comes next, then
             // the remote command. Putting it after the host would make ssh
             // pass a literal `--` as the first word of the remote command.
@@ -177,6 +204,7 @@ impl Transport for Ssh {
             .arg("-o")
             .arg(format!("ConnectTimeout={}", self.connect_timeout()))
             .args(self.persist_args())
+            .args(self.ssh_args(host))
             .arg("--")
             .arg(&host.name)
             .arg(probe_command(host))
@@ -196,6 +224,7 @@ impl Transport for Ssh {
             .arg("-o")
             .arg(format!("ConnectTimeout={}", self.connect_timeout()))
             .args(self.persist_args())
+            .args(self.ssh_args(host))
             .arg("--")
             .arg(&host.name)
             .arg(&check)
@@ -319,6 +348,8 @@ mod tests {
             ffmpeg_bin: None,
             ffprobe_bin: None,
             agent_addr: None,
+            ssh_args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
             paths: vec![],
         }
     }
@@ -333,6 +364,7 @@ mod tests {
                 .to_string(),
             timeout: Duration::from_secs(5),
             persist: None,
+            ssh_args: Vec::new(),
         }
     }
 
@@ -474,6 +506,95 @@ mod tests {
             recorded(&probe_argv)
                 .iter()
                 .any(|a| a == "ControlMaster=auto")
+        );
+    }
+
+    #[test]
+    fn configured_ssh_args_come_between_persistence_and_the_host() {
+        let dir = fixture("ssh-args");
+        let _serial = crate::exclusive();
+        let argv = dir.join("argv");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        executable(&bin.join("ffmpeg"), "#!/bin/sh\nexit 0\n");
+        let mut s = ssh(fake_exec_ssh(&dir, &argv, &bin), &dir);
+        s.ssh_args = vec!["-o".into(), "StrictHostKeyChecking=yes".into()];
+        s.persist = Some(Persist {
+            dir: dir.join("sock"),
+            secs: 300,
+        });
+        let mut h = host();
+        h.ssh_args = vec!["-i".into(), "/home/alice/.ssh/worker".into()];
+
+        s.run(&h, &job(&[]), false).expect("run");
+
+        let v = recorded(&argv);
+        let persist = v
+            .iter()
+            .position(|a| a == "ControlPersist=300")
+            .expect("ControlPersist");
+        assert_eq!(v[persist + 1], "-o");
+        assert_eq!(v[persist + 2], "StrictHostKeyChecking=yes");
+        assert_eq!(v[persist + 3], "-i");
+        assert_eq!(v[persist + 4], "/home/alice/.ssh/worker");
+        assert_eq!(v[persist + 5], "--");
+        assert_eq!(v[persist + 6], "worker");
+    }
+
+    #[test]
+    fn configured_ssh_args_need_no_persistence() {
+        let dir = fixture("ssh-args-nopersist");
+        let _serial = crate::exclusive();
+        let argv = dir.join("argv");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        executable(&bin.join("ffmpeg"), "#!/bin/sh\nexit 0\n");
+        let mut s = ssh(fake_exec_ssh(&dir, &argv, &bin), &dir);
+        s.ssh_args = vec!["-i".into(), "key".into()];
+
+        s.run(&host(), &job(&[]), false).expect("run");
+
+        let v = recorded(&argv);
+        assert_eq!(v[0], "-T");
+        assert_eq!(v[1], "-o");
+        assert_eq!(v[2], "ServerAliveInterval=15");
+        assert_eq!(v[3], "-i");
+        assert_eq!(v[4], "key");
+        assert_eq!(v[5], "--");
+        assert_eq!(v[6], "worker");
+        assert!(!v.iter().any(|a| a.starts_with("Control")));
+    }
+
+    #[test]
+    fn host_env_prefixes_the_command_and_survives_the_shell() {
+        let dir = fixture("env");
+        let _serial = crate::exclusive();
+        let argv = dir.join("argv");
+        let out = dir.join("out");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        executable(
+            &bin.join("ffmpeg"),
+            &format!(
+                "#!/bin/sh\nprintf '%s|%s' \"$A\" \"$B\" > '{}'\n",
+                out.display()
+            ),
+        );
+        let s = ssh(fake_exec_ssh(&dir, &argv, &bin), &dir);
+        let mut h = host();
+        h.env.insert("A".into(), "a b $HOME".into());
+        h.env.insert("B".into(), "x:y".into());
+
+        s.run(&h, &job(&[]), false).expect("run");
+
+        assert_eq!(
+            std::fs::read_to_string(&out).expect("env reached the child"),
+            "a b $HOME|x:y"
+        );
+        let remote = s.remote_command(&job(&[]), &h, false).unwrap();
+        assert!(
+            remote.ends_with("&& exec env 'A=a b $HOME' 'B=x:y' 'ffmpeg'"),
+            "{remote}"
         );
     }
 

@@ -69,6 +69,15 @@ fn run() -> Result<i32> {
 
     if config.hosts.is_empty() {
         // Local-only mode: no state, no thread, nothing on the critical path.
+        // A client that forbids the fallback refuses even here, or a missing
+        // config would quietly encode in software.
+        if !config.fallback_local && program == Program::Ffmpeg {
+            rrffmpeg::log_at!(
+                rrffmpeg::log::Level::Error,
+                "no worker configured and fallback_local is false: not encoding on this host"
+            );
+            return Ok(1);
+        }
         return run_local(&config, program, &args, stderr_as_stdout);
     }
 
@@ -113,6 +122,16 @@ fn run() -> Result<i32> {
     ) {
         Dispatch::Ran(code) => Ok(code),
         Dispatch::NoSlot => {
+            // A probe is cheap and Jellyfin needs it for direct-play, so only
+            // an ffmpeg job is refused when the fallback is forbidden.
+            if !config.fallback_local && program == Program::Ffmpeg {
+                rrffmpeg::log_at!(
+                    rrffmpeg::log::Level::Error,
+                    "no worker slot after {}s and fallback_local is false: not encoding on this host",
+                    config.queue_wait_secs
+                );
+                return Ok(1);
+            }
             rrffmpeg::log_at!(
                 rrffmpeg::log::Level::Warn,
                 "no worker slot after {}s, running locally",
@@ -218,7 +237,7 @@ fn run_local(
     let bin = std::env::var_os("RRFFMPEG_BIN")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| config.local_binary(program).clone());
-    let err = Command::new(&bin).args(args).exec();
+    let err = Command::new(&bin).args(args).envs(&config.local_env).exec();
     Err(Error::Io(err, format!("cannot run {}", bin.display())))
 }
 
@@ -242,6 +261,7 @@ fn agent_client(config: &Config) -> Result<Option<rrffmpeg::agent::Agent>> {
 /// SSH transport, with one persistent connection per host when configured.
 fn ssh_transport(config: &Config) -> Result<Ssh> {
     let mut ssh = Ssh::new(config.ssh_bin.clone());
+    ssh.ssh_args = config.ssh_args.clone();
     if config.ssh_persist_secs == 0 {
         return Ok(ssh);
     }
@@ -464,6 +484,8 @@ mod tests {
             ffmpeg_bin: None,
             ffprobe_bin: None,
             agent_addr: None,
+            ssh_args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
             paths: Vec::new(),
         }
     }

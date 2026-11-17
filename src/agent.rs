@@ -50,7 +50,7 @@ const HANDSHAKE: Duration = Duration::from_secs(5);
 
 /// Revision of the client/daemon protocol. Bump it when a frame or a field
 /// changes meaning; the daemon refuses a peer that speaks another revision.
-const PROTOCOL: u32 = 1;
+const PROTOCOL: u32 = 2;
 
 /// What the client says first on every connection.
 #[derive(Debug, Serialize, Deserialize)]
@@ -68,6 +68,9 @@ struct Hello {
     program: String,
     #[serde(default)]
     args: Vec<String>,
+    /// `K=V` pairs for the child, sorted by key on the client.
+    #[serde(default)]
+    env: Vec<String>,
     /// Worker-side roots the daemon must be able to stat, for `probe`.
     #[serde(default)]
     paths: Vec<String>,
@@ -456,6 +459,7 @@ impl Agent {
             job: job_id.clone(),
             program: String::new(),
             args: Vec::new(),
+            env: Vec::new(),
             paths: Vec::new(),
         };
         let mut stream = match self.hello(&host, &hello, None) {
@@ -524,6 +528,7 @@ impl Agent {
             job: job.id.clone(),
             program: program.to_string(),
             args,
+            env: host.env.iter().map(|(k, v)| format!("{k}={v}")).collect(),
             paths: Vec::new(),
         };
         // `ready` is the line between "the daemon ran it" and "it never
@@ -622,6 +627,7 @@ impl Agent {
                 job: job.unwrap_or_default().to_string(),
                 program: String::new(),
                 args: Vec::new(),
+                env: Vec::new(),
                 paths: paths.to_vec(),
             },
             Some(self.timeout),
@@ -815,6 +821,7 @@ fn pid_alive(pid: u32) -> bool {
 fn exec_reply(mut stream: Stream, hello: &Hello, live: &Live) -> Result<()> {
     let mut child = Command::new(&hello.program)
         .args(&hello.args)
+        .envs(hello.env.iter().filter_map(|kv| kv.split_once('=')))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1003,6 +1010,8 @@ mod tests {
             ffmpeg_bin: Some(bin.into()),
             ffprobe_bin: Some(bin.into()),
             agent_addr: Some(addr.into()),
+            ssh_args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
             paths: vec![],
         }
     }
@@ -1121,6 +1130,23 @@ mod tests {
     }
 
     #[test]
+    fn the_child_receives_the_host_env() {
+        let addr = start();
+        let mut h = host(&addr, "/bin/sh");
+        h.env.insert("OCL_ICD_VENDORS".into(), "/opt/intel".into());
+        h.env.insert("SPACED".into(), "a b $HOME".into());
+        let (code, out, _) = exec(
+            &agent(),
+            &h,
+            &job(&["-c", "printf '%s|%s' \"$OCL_ICD_VENDORS\" \"$SPACED\""]),
+            None,
+        )
+        .expect("exec");
+        assert_eq!(code, 0);
+        assert_eq!(out, "/opt/intel|a b $HOME");
+    }
+
+    #[test]
     fn a_large_output_does_not_deadlock() {
         let addr = start();
         let h = host(&addr, "/bin/sh");
@@ -1228,7 +1254,7 @@ mod protocol_tests {
         let err = check_protocol(0, "worker").unwrap_err();
         let text = err.to_string();
         assert!(text.contains("protocol 0"), "{text}");
-        assert!(text.contains("this daemon speaks 1"), "{text}");
+        assert!(text.contains("this daemon speaks 2"), "{text}");
     }
 
     #[test]

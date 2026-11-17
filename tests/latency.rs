@@ -46,6 +46,8 @@ fn setup() -> (Arc<rrffmpeg::config::Host>, Agent, PathBuf) {
         ffmpeg_bin: Some("/bin/true".into()),
         ffprobe_bin: Some("/bin/true".into()),
         agent_addr: Some(addr),
+        ssh_args: Vec::new(),
+        env: std::collections::BTreeMap::new(),
         paths: vec![],
     };
     let agent = Agent::load(TOKEN.into(), &dir.join("cert.pem")).expect("agent");
@@ -164,6 +166,8 @@ fn dispatch_latency_ssh() {
         ffmpeg_bin: Some("/bin/true".into()),
         ffprobe_bin: Some("/bin/true".into()),
         agent_addr: None,
+        ssh_args: Vec::new(),
+        env: std::collections::BTreeMap::new(),
         paths: vec![],
     });
     let ssh = rrffmpeg::transport::Ssh::new(PathBuf::from("ssh"));
@@ -361,6 +365,8 @@ fn worker() -> Host {
         ffmpeg_bin: None,
         ffprobe_bin: None,
         agent_addr: None,
+        ssh_args: Vec::new(),
+        env: std::collections::BTreeMap::new(),
         paths: Vec::new(),
     }
 }

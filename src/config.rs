@@ -6,7 +6,12 @@
 
 use crate::{Error, Result};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+
+fn yes() -> bool {
+    true
+}
 
 fn one() -> usize {
     1
@@ -110,6 +115,12 @@ pub struct Host {
     pub agent_addr: Option<String>,
     #[serde(default)]
     pub paths: Vec<PathMap>,
+    /// Extra ssh arguments for this host, appended after the global ones.
+    #[serde(default)]
+    pub ssh_args: Vec<String>,
+    /// Variables set on the worker when it runs the job.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -131,6 +142,9 @@ pub struct Config {
     /// `docs/latency.md`. Only used when `ssh_persist_secs` is above zero.
     #[serde(default)]
     pub ssh_socket_dir: Option<PathBuf>,
+    /// Extra ssh arguments, shared by every host. A host may append more.
+    #[serde(default)]
+    pub ssh_args: Vec<String>,
     /// Shared secret of the agent daemon. `RRFFMPEG_AGENT_TOKEN` wins.
     #[serde(default)]
     pub agent_token: Option<String>,
@@ -145,6 +159,14 @@ pub struct Config {
     /// long wait beats running a transcode on a host with no GPU.
     #[serde(default = "default_queue_wait")]
     pub queue_wait_secs: u64,
+    /// Run the local binary when no worker slot frees up. An ffprobe always
+    /// does, a transcode only when this is true: software encoding on a
+    /// GPU-less client is worse than a failed request.
+    #[serde(default = "yes")]
+    pub fallback_local: bool,
+    /// Variables set on the local binary. A GPU-less client uses none.
+    #[serde(default)]
+    pub local_env: BTreeMap<String, String>,
     /// How long one process's "host down" verdict is trusted by the others.
     /// Expiry is the whole repair mechanism: no daemon clears the flag.
     #[serde(default = "default_down_ttl")]
@@ -168,11 +190,14 @@ impl Default for Config {
             ssh_bin: default_ssh(),
             ssh_persist_secs: default_ssh_persist(),
             ssh_socket_dir: None,
+            ssh_args: Vec::new(),
             agent_token: None,
             agent_cert: None,
             local_ffmpeg: default_ffmpeg(),
             local_ffprobe: default_ffprobe(),
             queue_wait_secs: default_queue_wait(),
+            fallback_local: true,
+            local_env: BTreeMap::new(),
             down_ttl_secs: default_down_ttl(),
             client_name: default_client_name(),
             client_weight: default_client_weight(),
@@ -263,6 +288,47 @@ to = "/home/bob/media"
             pinned.ssh_socket_dir,
             Some(PathBuf::from("/run/user/1000/rffmpeg"))
         );
+    }
+
+    #[test]
+    fn the_fallback_is_on_by_default_and_can_be_forbidden() {
+        assert!(Config::from_toml("").unwrap().fallback_local);
+        assert!(
+            !Config::from_toml("fallback_local = false")
+                .unwrap()
+                .fallback_local
+        );
+    }
+
+    #[test]
+    fn ssh_args_and_env_are_empty_by_default_and_add_up_per_host() {
+        let cfg = Config::from_toml(
+            r#"
+ssh_args = ["-o", "StrictHostKeyChecking=yes"]
+
+[[hosts]]
+name = "worker"
+ssh_args = ["-i", "/home/alice/.ssh/worker"]
+
+[hosts.env]
+OCL_ICD_VENDORS = "/opt/intel/opencl"
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.ssh_args, vec!["-o", "StrictHostKeyChecking=yes"]);
+        assert_eq!(cfg.hosts[0].ssh_args, vec!["-i", "/home/alice/.ssh/worker"]);
+        assert_eq!(
+            cfg.hosts[0].env.get("OCL_ICD_VENDORS").map(String::as_str),
+            Some("/opt/intel/opencl")
+        );
+        assert!(Config::from_toml("").unwrap().local_env.is_empty());
+        assert!(Config::from_toml("").unwrap().ssh_args.is_empty());
+    }
+
+    #[test]
+    fn a_bad_ssh_arg_type_is_a_config_error() {
+        let err = Config::from_toml("ssh_args = \"-i key\"").unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "{err}");
     }
 
     #[test]
