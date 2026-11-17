@@ -14,9 +14,18 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Waits used while polling for a slot. A negative priority polls fast, the
 /// rest back off so co-scheduled jobs do not hammer the state dir.
-const FAST_POLL: Duration = Duration::from_millis(20);
-const SLOW_POLL_START: Duration = Duration::from_millis(40);
+///
+/// The fast wait is the latency a queued job pays when a slot frees, so it is
+/// short: one pass costs about 50 us, and only the job at the head of a lane
+/// pays it. The first slow wait is likewise short, because a job two places
+/// back must not sleep through its own turn.
+const FAST_POLL: Duration = Duration::from_millis(2);
+const SLOW_POLL_START: Duration = Duration::from_millis(10);
 const SLOW_POLL_MAX: Duration = Duration::from_millis(400);
+
+/// A ticket older than 3 s is dropped as dead, so refreshing it on every fast
+/// poll is 500 times more often than needed.
+const REFRESH_EVERY: Duration = Duration::from_millis(500);
 
 /// Passes over the host list before `acquire` gives up, so a lost race cannot
 /// spin forever.
@@ -68,6 +77,17 @@ impl Scheduler {
     /// ratio, first in config order on ties.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn acquire(&self, job: &Job) -> Option<Lease> {
+        // Someone already waits for a slot this job could use, so queue up
+        // behind them. A caller that skips this takes the slot a waiter slept
+        // through, and a stream of fresh callers can starve it for good.
+        for host in &self.hosts {
+            if !self.locks.is_down(&host.name)
+                && self.capability_ok(host, job.capability.as_deref())
+                && self.queue.has_waiters(&host.name)
+            {
+                return None;
+            }
+        }
         for _ in 0..ACQUIRE_PASSES {
             let index = self.pick_host(job.capability.as_deref())?;
             let host = &self.hosts[index];
@@ -94,18 +114,31 @@ impl Scheduler {
         }
         let lanes = self.lanes(job);
         let mut wait = base_interval(job.priority);
+        let mut refresh_due = Instant::now() + REFRESH_EVERY;
         loop {
             let mut ready = false;
+            let mut free = false;
             // Refresh every ticket, not only the one for a host with a free
             // slot: a full host can stay full for the length of a transcode,
             // and a ticket nobody refreshed is dropped as dead after 3 s.
-            for lane in lanes.values() {
-                self.queue.refresh(lane);
+            if Instant::now() >= refresh_due {
+                for lane in lanes.values() {
+                    self.queue.refresh(lane);
+                }
+                refresh_due = Instant::now() + REFRESH_EVERY;
             }
             if let Some(index) = self.pick_host(job.capability.as_deref()) {
+                // A free slot means the queue is draining now, so poll fast
+                // even if a ticket still ranks ahead: otherwise a job sleeps
+                // through its own turn at the backoff rate, and a loaded
+                // worker hands out one slot per backoff step.
+                free = true;
                 let host = &self.hosts[index];
                 if let Some(lane) = lanes.get(&host.name) {
-                    ready = self.queue.ahead(lane);
+                    // Pass when fewer tickets rank ahead than there are slots
+                    // free right now: the first jobs go at once, in order.
+                    let open = host.concurrency.saturating_sub(self.locks.occupancy(host));
+                    ready = self.queue.before_me(lane) < open;
                     if ready && let Some(guard) = self.locks.try_acquire(host, &job.id) {
                         // Only a job that had to wait is charged, so the
                         // shares measure contention and not idle history.
@@ -121,8 +154,7 @@ impl Scheduler {
             if now >= deadline {
                 return None;
             }
-            // A job that is next in line must not sleep through a freed slot.
-            let pause = if ready { FAST_POLL } else { wait };
+            let pause = if ready || free { FAST_POLL } else { wait };
             thread::sleep(pause.min(deadline - now));
             wait = next_interval(job.priority, wait);
         }
@@ -421,6 +453,44 @@ mod tests {
             .expect("transcode thread")
             .expect("the transcode gets the slot next");
         drop(transcode_lease);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_newcomer_does_not_take_the_slot_a_waiter_queued_for() {
+        let (dir, locks) = scratch("no-jump");
+        let _serial = crate::exclusive();
+        let scheduler = Arc::new(Scheduler::new(
+            vec![host("w", 2, &[])],
+            locks,
+            Duration::from_secs(60),
+        ));
+        let first = scheduler.acquire(&job(0, None)).expect("first slot");
+        let second = scheduler.acquire(&job(0, None)).expect("second slot");
+
+        // Both slots are held, so this one has to publish a ticket and wait.
+        let waiter = {
+            let scheduler = Arc::clone(&scheduler);
+            thread::spawn(move || scheduler.acquire_blocking(&job(0, None), Duration::from_secs(5)))
+        };
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            scheduler.queue.has_waiters("w"),
+            "the waiter must publish a ticket"
+        );
+
+        // A slot frees while the waiter sleeps out its poll interval. Without
+        // the check the newcomer takes it and the waiter loses its turn.
+        drop(second);
+        assert!(
+            scheduler.acquire(&job(0, None)).is_none(),
+            "a newcomer must queue behind the waiter"
+        );
+
+        drop(first);
+        let lease = waiter.join().expect("waiter thread");
+        assert!(lease.is_some(), "the waiter gets the free slot");
+        drop(lease);
         let _ = std::fs::remove_dir_all(dir);
     }
 

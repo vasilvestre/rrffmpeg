@@ -1,6 +1,6 @@
 # 0010: TLS for the agent transport, one pinned certificate
 
-Status: Accepted
+Status: Accepted, amended by ADR-0018
 Date: 2026-11-17
 
 ## Context

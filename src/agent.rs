@@ -25,10 +25,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{ChildStdin, Command, Stdio};
-use std::sync::mpsc::{SyncSender, sync_channel};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -47,10 +47,6 @@ const MAX_FRAME: usize = 1 << 20;
 
 /// Connect and handshake budget. A silent peer must not park a thread.
 const HANDSHAKE: Duration = Duration::from_secs(5);
-
-/// Frames buffered between a child pipe and the socket. A full queue blocks
-/// the pump, the pipe fills, and ffmpeg waits: that is the backpressure.
-const QUEUE: usize = 64;
 
 /// Revision of the client/daemon protocol. Bump it when a frame or a field
 /// changes meaning; the daemon refuses a peer that speaks another revision.
@@ -383,6 +379,7 @@ pub struct Agent {
 
 impl Agent {
     /// `cert` is the PEM of the daemon certificate, the only trust anchor.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn load(token: String, cert: &Path) -> Result<Agent> {
         Ok(Agent {
             token,
@@ -394,6 +391,7 @@ impl Agent {
     /// Connect and shake hands. The socket has no read timeout after this,
     /// except where the caller sets one: a transcode can stay silent for
     /// minutes while ffmpeg works.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn open(&self, host: &Host, timeout: Option<Duration>) -> Result<Stream> {
         let name = host
             .agent_addr
@@ -437,7 +435,20 @@ impl Agent {
     }
 
     /// The stdin connection: one thread writes it, nobody reads it here.
+    ///
+    /// Most jobs never write stdin: a probe, and a transcode until Jellyfin
+    /// asks it to stop. So the thread waits for the first byte before it opens
+    /// the connection. A silent job then pays no second TLS handshake, on the
+    /// client or on the daemon.
     fn stdin_thread(&self, host: Host, job_id: String, stdin: Option<Box<dyn Read + Send>>) {
+        let Some(mut src) = stdin else {
+            return;
+        };
+        let mut buf = vec![0u8; 32 * 1024];
+        let first = match src.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
         let hello = Hello {
             version: PROTOCOL,
             token: self.token.clone(),
@@ -457,15 +468,15 @@ impl Agent {
                 return;
             }
         };
-        if let Some(mut src) = stdin {
-            let mut buf = vec![0u8; 32 * 1024];
-            loop {
-                match src.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if write_frame(&mut stream, STDIN, &buf[..n]).is_err() {
-                            return;
-                        }
+        if write_frame(&mut stream, STDIN, &buf[..first]).is_err() {
+            return;
+        }
+        loop {
+            match src.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if write_frame(&mut stream, STDIN, &buf[..n]).is_err() {
+                        return;
                     }
                 }
             }
@@ -481,6 +492,7 @@ impl Agent {
 
     /// Run one job with output going to the two sinks. `run` passes this
     /// process's own fds; the tests pass buffers.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn exec(
         &self,
         host: &Host,
@@ -761,6 +773,10 @@ fn check_protocol(version: u32, peer: &str) -> Result<()> {
 
 /// Complete the handshake, then let the caller decide about timeouts.
 fn accept(sock: TcpStream, tls: Arc<ServerConfig>, peer: &str) -> Result<Stream> {
+    // READY, every output frame and EXIT are small writes. Without this, Nagle
+    // holds each one until the previous is acknowledged, and a worker on
+    // another machine adds a delayed ACK, up to 40 ms, to the start of a job.
+    let _ = sock.set_nodelay(true);
     sock.set_read_timeout(Some(HANDSHAKE))
         .map_err(|e| io_err(e, "setting the handshake timeout"))?;
     let conn = ServerConnection::new(tls)
@@ -824,34 +840,83 @@ fn exec_reply(mut stream: Stream, hello: &Hello, live: &Live) -> Result<()> {
     );
     // The client waits for this before it opens the stdin connection, so the
     // job is in the registry before anyone looks for it.
-    write_frame(&mut stream, READY, &[]).map_err(|e| io_err(e, "sending ready"))?;
+    if let Err(e) = write_frame(&mut stream, READY, &[]) {
+        abandon(&mut child, live, &hello.job);
+        return Err(io_err(e, "sending ready"));
+    }
 
-    // The waiter owns the child and both pipes. Frames go through this queue
-    // so exactly one thread, the one below, writes the socket.
-    let (tx, rx) = sync_channel::<(u8, Vec<u8>)>(QUEUE);
-    let job = hello.job.clone();
-    let waiter_live = live.clone();
-    std::thread::spawn(move || {
-        let stdout_pump = pump(stdout_pipe, tx.clone(), STDOUT);
-        let stderr_pump = pump(stderr_pipe, tx.clone(), STDERR);
-        let code = child
-            .wait()
-            .map(|s| s.code().unwrap_or_else(|| 128 + s.signal().unwrap_or(0)))
-            .unwrap_or(-1);
-        let _ = stdout_pump.join();
-        let _ = stderr_pump.join();
-        // The exit frame must come after the pipes are empty or the last
-        // stderr line races the code and the client drops it.
-        let _ = tx.send((EXIT, code.to_be_bytes().to_vec()));
-        lock(&waiter_live).remove(&job);
-    });
-
-    while let Ok((kind, body)) = rx.recv() {
-        if write_frame(&mut stream, kind, &body).is_err() {
-            break;
+    // This thread owns the child and both pipes, so it is also the only
+    // writer of the socket. No relay thread, no queue, and no chunk copied
+    // twice: poll says which pipe has data, the frame goes straight out.
+    let mut out = stdout_pipe;
+    let mut err = stderr_pipe;
+    let mut fds = [poll_fd(out.as_raw_fd()), poll_fd(err.as_raw_fd())];
+    let mut buf = vec![0u8; 32 * 1024];
+    let mut open = 2;
+    while open > 0 {
+        // SAFETY: both fds are owned by the pipes above and stay open until
+        // this loop clears the entry.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+        if ready < 0 {
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            abandon(&mut child, live, &hello.job);
+            return Err(io_err(e, "waiting on the child pipes"));
+        }
+        for (index, pipe) in [&mut out as &mut dyn Read, &mut err as &mut dyn Read]
+            .into_iter()
+            .enumerate()
+        {
+            if fds[index].revents == 0 {
+                continue;
+            }
+            match pipe.read(&mut buf) {
+                Ok(0) => {
+                    fds[index].fd = -1;
+                    open -= 1;
+                }
+                Ok(n) => {
+                    let kind = if index == 0 { STDOUT } else { STDERR };
+                    if let Err(e) = write_frame(&mut stream, kind, &buf[..n]) {
+                        abandon(&mut child, live, &hello.job);
+                        return Err(io_err(e, "relaying a child pipe"));
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => {
+                    fds[index].fd = -1;
+                    open -= 1;
+                }
+            }
         }
     }
-    Ok(())
+
+    // Both pipes are empty, so the code cannot race the last stderr line.
+    let code = child
+        .wait()
+        .map(|s| s.code().unwrap_or_else(|| 128 + s.signal().unwrap_or(0)))
+        .unwrap_or(-1);
+    lock(live).remove(&hello.job);
+    write_frame(&mut stream, EXIT, &code.to_be_bytes()).map_err(|e| io_err(e, "sending exit"))
+}
+
+/// Give up on a job whose client went away. The child is ours, so it dies
+/// here: nobody is left to read its output, and Jellyfin discards the partial
+/// files behind a dropped job.
+fn abandon(child: &mut Child, live: &Live, job: &str) {
+    let _ = child.kill();
+    let _ = child.wait();
+    lock(live).remove(job);
+}
+
+fn poll_fd(fd: RawFd) -> libc::pollfd {
+    libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    }
 }
 
 /// The stdin connection. Its end is the client's end: a client that goes away
@@ -894,28 +959,6 @@ fn stdin_reply(mut stream: Stream, mut framer: Framer, hello: &Hello, live: &Liv
         }
     }
     Ok(())
-}
-
-/// Copy one child pipe into frames of one kind.
-fn pump(
-    pipe: impl Read + Send + 'static,
-    tx: SyncSender<(u8, Vec<u8>)>,
-    kind: u8,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        let mut pipe = pipe;
-        let mut buf = [0u8; 32 * 1024];
-        loop {
-            match pipe.read(&mut buf) {
-                Ok(0) | Err(_) => return,
-                Ok(n) => {
-                    if tx.send((kind, buf[..n].to_vec())).is_err() {
-                        return;
-                    }
-                }
-            }
-        }
-    })
 }
 
 #[cfg(test)]

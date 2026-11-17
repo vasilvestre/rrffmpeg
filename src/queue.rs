@@ -120,10 +120,32 @@ impl Queue {
         }
     }
 
+    /// True when a live job waits in this host's lane.
+    ///
+    /// A job that can take a slot without queueing still has to ask, or every
+    /// newcomer jumps the queue a waiter is standing in, and the waiter sleeps
+    /// through slot after slot.
+    pub fn has_waiters(&self, host: &str) -> bool {
+        let Ok(entries) = std::fs::read_dir(self.dir(host)) else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            entry.path().extension().and_then(|e| e.to_str()) == Some("want") && !stale(&entry)
+        })
+    }
+
     /// True when no other ticket ranks before this one.
     pub fn ahead(&self, lane: &Lane) -> bool {
+        self.before_me(lane) == 0
+    }
+
+    /// How many live tickets rank before this one.
+    ///
+    /// A waiter may pass as soon as that count is under the number of free
+    /// slots: strict order among the slots, not one job per poll.
+    pub fn before_me(&self, lane: &Lane) -> usize {
         if lane.file.is_none() {
-            return true;
+            return 0;
         }
         let served = self.starts(&lane.dir);
         let mine = rank(
@@ -136,8 +158,9 @@ impl Queue {
         );
         let entries = match std::fs::read_dir(&lane.dir) {
             Ok(entries) => entries,
-            Err(_) => return true,
+            Err(_) => return 0,
         };
+        let mut before = 0;
         for entry in entries.flatten() {
             let path = entry.path();
             if path == lane.path || path.extension().and_then(|e| e.to_str()) != Some("want") {
@@ -153,12 +176,11 @@ impl Queue {
             let Some((class, weight, seq, client)) = parse(&text, &path) else {
                 continue;
             };
-            let theirs = rank(class, weight, &client, seq, &path, &served);
-            if theirs.before(&mine) {
-                return false;
+            if rank(class, weight, &client, seq, &path, &served).before(&mine) {
+                before += 1;
             }
         }
-        true
+        before
     }
 
     /// Count one start for `client` on `host`. Called only when the job had to
@@ -394,6 +416,25 @@ mod tests {
         five.insert("a".to_string(), 5);
         let heavy_ahead = rank(0, 400, "a", 10, path, &five);
         assert!(light_level.before(&heavy_ahead));
+    }
+
+    #[test]
+    fn before_me_counts_every_better_ticket() {
+        let (dir, queue) = scratch("before");
+        let first = queue.join("w", 0, "alice", 100);
+        let second = queue.join("w", 0, "alice", 100);
+        let third = queue.join("w", 0, "alice", 100);
+        assert_eq!(queue.before_me(&first), 0);
+        assert_eq!(queue.before_me(&second), 1);
+        assert_eq!(queue.before_me(&third), 2);
+        // Two of the three tickets rank ahead of the third one, so two free
+        // slots let it through without waiting for the others to leave.
+        assert_eq!(queue.before_me(&third), 2);
+        drop(first);
+        assert_eq!(queue.before_me(&third), 1);
+        drop(second);
+        assert!(queue.ahead(&third));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

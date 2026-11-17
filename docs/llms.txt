@@ -27,13 +27,15 @@ Each entry points at raw Markdown so a reader gets plain text.
 - [0005 SSH transport](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0005-ssh-transport.md): SSH first, behind a trait.
 - [0008 Cross-process slots](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0008-cross-process-slots.md): slot files and an expiring down verdict.
 - [0009 Agent transport](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0009-agent-transport.md): the agent daemon as a second transport.
-- [0010 Agent TLS](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0010-agent-tls.md): one pinned certificate, one connection per direction.
+- [0010 Agent TLS](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0010-agent-tls.md): one pinned certificate, one connection per direction, amended by 0018.
 - [0011 Journal timings](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0011-journal-timings.md): timings in the journal, read back by `rrffmpeg-stats`.
 - [0012 Shared queue with client weight](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0012-shared-queue-with-client-weight.md): ticket queue orders starts.
 - [0013 Retry a job that never started](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0013-retry-a-job-that-never-started.md): move an unstarted job to another host.
 - [0014 SSH connection persistence](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0014-ssh-connection-persistence.md): one long-lived ssh per host, so a job pays a channel open.
 - [0015 Journal replay](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0015-replay-waits-for-the-janitor.md): the replay runs when the janitor reads it, not at open.
 - [0016 Verifiable install and update](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0016-verifiable-install-and-update.md): `--version`, a tag check, one install script, and a protocol revision.
+- [0017 The queue decides at the door](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0017-queue-decides-at-the-door.md): a newcomer queues behind a waiter, and free slots are handed out in a batch, measured at 16 concurrent clients.
+- [0018 One thread relays a job](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0018-one-thread-relay-and-lazy-stdin.md): the daemon polls both pipes itself, and the stdin connection opens on the first byte.
 
 ## Optional
 

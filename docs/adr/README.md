@@ -19,12 +19,14 @@ ADR-NNNN` and add the new record.
 | [0007](0007-pid-file-liveness.md) | Per-job pid file for liveness | Accepted |
 | [0008](0008-cross-process-slots.md) | Cross-process slot files and an expiring down verdict | Accepted |
 | [0009](0009-agent-transport.md) | An agent daemon as a second transport | Accepted, transport superseded by [0010](0010-agent-tls.md) |
-| [0010](0010-agent-tls.md) | TLS with one pinned certificate, one connection per direction | Accepted |
+| [0010](0010-agent-tls.md) | TLS with one pinned certificate, one connection per direction | Accepted, amended by [0018](0018-one-thread-relay-and-lazy-stdin.md) |
 | [0011](0011-journal-timings.md) | The journal carries its own timings, read back by `rrffmpeg-stats` | Accepted |
-| [0012](0012-shared-queue-with-client-weight.md) | A shared ticket queue orders starts, with a weight per client | Accepted |
+| [0012](0012-shared-queue-with-client-weight.md) | A shared ticket queue orders starts, with a weight per client | Accepted, amended by [0017](0017-queue-decides-at-the-door.md) |
 | [0013](0013-retry-a-job-that-never-started.md) | Retry a job that never started on another host | Accepted |
 | [0014](0014-ssh-connection-persistence.md) | Keep the SSH connection open between jobs | Accepted |
 | [0015](0015-replay-waits-for-the-janitor.md) | Replay the journal only when the janitor reads it | Accepted |
 | [0016](0016-verifiable-install-and-update.md) | A version output, a tag check, and one install script | Accepted |
+| [0017](0017-queue-decides-at-the-door.md) | The queue decides at the door, and passes free slots in a batch | Accepted |
+| [0018](0018-one-thread-relay-and-lazy-stdin.md) | One daemon thread relays a job, and the stdin connection opens on use | Accepted |
 
 All records dated 2026-11-17.

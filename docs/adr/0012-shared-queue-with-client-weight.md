@@ -1,6 +1,6 @@
 # 0012: A shared queue decides who starts next
 
-Status: Accepted
+Status: Accepted, amended by ADR-0017
 Date: 2026-11-17
 
 ## Context

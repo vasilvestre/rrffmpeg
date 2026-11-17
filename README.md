@@ -112,8 +112,9 @@ Ship the smallest thing that is strictly better than rffmpeg. State today:
   correct `stdin`/`stdout`/`stderr` handling (including rffmpeg's
   `stderr_as_stdout` special-case). Verified against real ffmpeg 8.0.1.
 - [x] One worker over SSH, with path mapping in both directions.
-- [x] Agent transport: `rrffmpeg-agent` on the worker, two TLS connections per
-  job. `agent_addr` on a host selects it, else SSH. ADR 0009 and ADR 0010.
+- [x] Agent transport: `rrffmpeg-agent` on the worker, one TLS connection per
+  job, and a second one only when the job writes `stdin`. `agent_addr` on a
+  host selects it, else SSH. ADR 0009, ADR 0010, ADR 0018.
 - [x] Async WAL bookkeeping plus a janitor (re-test, reap). A job that never
   started on a worker is retried once on another. A job whose client died
   still ends there: nobody is left to read its output. ADR 0013.

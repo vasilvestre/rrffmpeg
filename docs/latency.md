@@ -50,16 +50,34 @@ printf "rrffmpeg + agent      "; RRFFMPEG_CONFIG=$PWD/config.toml ./measure.sh 6
 Release build, daemon in-process, job is `/bin/true`.
 
 ```text
-loopback, 16 cores, 31812 MiB RAM, load 0.71 0.67 0.61
-probe (one TLS connection)         n=200  p50=   0.27 ms  p95=   0.29 ms  p99=   0.31 ms  max=   0.36 ms
-dispatch through the agent         n=200  p50=   0.62 ms  p95=   0.69 ms  p99=   0.73 ms  max=   0.75 ms
-local /bin/true (floor)            n=200  p50=   0.29 ms  p95=   0.34 ms  p99=   0.35 ms  max=   0.37 ms
+loopback, 16 cores, 31812 MiB RAM, load 1.20 0.93 0.67
+probe (one TLS connection)         n=200  p50=   0.27 ms  p95=   0.36 ms  p99=   0.40 ms  max=   0.43 ms
+dispatch through the agent         n=200  p50=   0.64 ms  p95=   0.72 ms  p99=   0.75 ms  max=   0.80 ms
+local /bin/true (floor)            n=200  p50=   0.30 ms  p95=   0.34 ms  p99=   0.37 ms  max=   0.46 ms
 ```
 
-Read it as: a full job through two TLS connections costs 0.62 ms p50, and
-starting the same program locally costs 0.29 ms p50, so the agent transport
-adds **0.33 ms p50 and 0.38 ms p99**. One connection alone, the shape of a
-probe, is 0.27 ms p50. That is 0.7 percent of the 50 ms budget.
+Read it as: a full job through the agent costs 0.64 ms p50, and starting the
+same program locally costs 0.30 ms p50, so the agent transport adds **0.34 ms
+p50 and 0.38 ms p99**. One connection alone, the shape of a probe, is 0.27 ms
+p50 and that connection is now the only one a silent job opens (ADR 0018). That
+is 0.7 percent of the 50 ms budget.
+
+Where the 0.27 ms of one connection goes, measured by timing a bare TCP
+connect and close to the same daemon against a full probe, 100 runs each:
+
+```text
+tcp connect+close                  n=100  p50=  19 us  p95=  23 us  p99=  37 us
+probe (connect+handshake+status)   n=100  p50= 263 us  p95= 387 us  p99= 576 us
+```
+
+So the TCP connect is 7 percent of a probe. Almost all of it is TLS: the
+handshake, the daemon's thread for the connection, and the status round trip.
+Instruction counts from `valgrind --tool=callgrind` on one whole dispatch agree
+that the crypto dominates the client's CPU (4.4 M instructions, of which
+X25519 19 percent, P-256 30 percent, SHA-512 14 percent), which is why a
+cheaper signature scheme was tried and rejected: an Ed25519 certificate in
+place of the P-256 one moved nothing, because that CPU is not what the client
+waits for. Round trips are.
 
 The same job over SSH:
 
@@ -82,8 +100,9 @@ one connection per job, and inside that connection the TCP connect, version
 exchange, key exchange, authentication, command start and exit cost about 15
 one-way trips. Each 10 ms of one-way delay adds 165 ms to a job, so the wire
 part is about 8 round trips. The agent spawns no
-client process for a job. It opens two TLS connections to a daemon that already
-runs, control and stdin, and a probe costs 3 round trips, the same as a job.
+client process for a job. It opens one TLS connection to a daemon that already
+runs, and a second one only when the job writes `stdin` (ADR 0018). A probe
+costs 3 round trips, the same as a job.
 
 ## SSH connection persistence
 
@@ -224,28 +243,60 @@ you see the cost of a large passthrough such as `ffmpeg -encoders`. The SSH
 transport hands inherited file descriptors to `ssh`, so it cannot count bytes.
 Only the agent path logs them. No number has been taken for a large payload yet.
 
+## When the worker is oversubscribed
+
+One client at a time hides the queue. Jellyfin opens several jobs at once
+during a scan, and a worker with `concurrency = 8` then has more callers than
+slots. 16 client processes in parallel, 320 jobs each run, agent on loopback,
+job is `/bin/true` so the number is the queue and the transport only.
+
+| Run | p50 | p95 | p99 | max |
+|---|---|---|---|---|
+| before ADR 0017 | 2.60 ms | 3.82 ms | 42.90 ms | 43.77 ms |
+| after ADR 0017 | 4.21 ms | 4.67 ms | 6.45 ms | 12.66 ms |
+| before ADR 0017 | 2.50 ms | 3.78 ms | 292.67 ms | 314.66 ms |
+| after ADR 0017 | 4.30 ms | 4.66 ms | 6.33 ms | 12.53 ms |
+| before ADR 0017 | 2.50 ms | 3.68 ms | 130.78 ms | 303.95 ms |
+| after ADR 0017 | 4.28 ms | 6.38 ms | 12.40 ms | 31.36 ms |
+
+Every pair is one run before and one run after, back to back, same machine,
+same load.
+
+The tail is the number that matters: before, a waiter lost its turn to every
+newcomer and drained behind a doubling backoff, so one queue of 16 reached
+100 ms and once 1 s. After, a queued job passes as soon as a slot is free and
+no better ticket waits, so the tail is two or three poll intervals.
+
+The p50 rises because the order is now real: with twice as many clients as
+slots, half of them wait for a slot instead of taking one out of turn.
+
+`scripts/measure.py` runs one command at a time, so this table comes from a
+small parallel harness: `w` threads each running the same command, the elapsed
+time of every `subprocess.run` kept. It lives in `/tmp`, not in the repository,
+because it measures a property the crate tests already cover functionally
+(`a_newcomer_does_not_take_the_slot_a_waiter_queued_for`).
+
 ## Whole dispatcher, real ffmpeg
 
 ```text
-local ffmpeg            n=60  p50=27.84 ms  p95=29.90 ms  p99=31.64 ms  max=31.74 ms
-rrffmpeg passthrough    n=60  p50=28.62 ms  p95=30.53 ms  p99=32.02 ms  max=32.53 ms
-rrffmpeg + agent        n=60  p50=31.60 ms  p95=32.55 ms  p99=32.95 ms  max=41.86 ms
+ffmpeg direct           n=60  p50=25.32 ms  p95=26.52 ms  p99=28.51 ms  max=28.51 ms
+rrffmpeg + agent        n=60  p50=27.19 ms  p95=28.37 ms  p99=28.91 ms  max=28.91 ms
 ```
 
-Nearly all of that is ffmpeg itself: `ffmpeg -version` costs 27.8 ms of CPU
-before it prints anything, and no dispatcher changes that.
+Nearly all of that is ffmpeg itself: `ffmpeg -version` costs 25 ms of CPU before
+it prints anything, and no dispatcher changes that. The dispatcher adds **1.87
+ms p50 and 0.40 ms p99** to a real ffmpeg run, which is the same 1.65 ms it
+adds to `/bin/true`: the transport and the bookkeeping around it, and nothing
+that grows with the job.
 
-- The wrapper with no transport adds 0.8 ms p50 over calling ffmpeg directly.
-- The agent transport adds 3.0 ms p50 over the wrapper, 0.9 ms p99.
-
-So the whole dispatch, real ffmpeg included, is p99 32.95 ms. The dispatcher's
-own share is the 3.8 ms between the first and third line.
-
-The 3.0 ms gap is larger than the 0.33 ms the in-process harness measures. The
-difference is the parts the in-process harness omits: reading the config,
-opening the journal, taking a slot file, and scheduling the daemon's four
-threads per job. `strace -c` on the client attributes only 0.2 ms to syscalls
-on the agent path, so the remainder is CPU and thread handoff, not waiting.
+The rest of the client's share is bookkeeping, measured with the `hotpath`
+feature on one dispatch: config 40 us, journal open 56 us, slot 38 us, agent
+build 20 us, journal append 4 us. A whole `elapsed_us`, from process start to
+the job going out, is 163 us p50 and 198 us p99 on this box. Process start
+dominates that, and it is where a statically linked binary wins: a trivial
+dynamically linked program starts in 340 us here against 240 us static, so the
+release binaries, which are `musl` static, start 100 us faster than these `gnu`
+measurements show.
 
 ## Journal growth
 
@@ -390,6 +441,9 @@ per job dRSS +0.48 KiB  dthreads +0.00  dfds +0.00
 ```
 
 Threads and file descriptors stay flat, so the daemon keeps nothing per job.
+Counted from outside, on the real daemon: `/proc/<agent>/task` holds 1 entry
+when idle, 2 one second into a 3 s job (ADR 0018), where the relay before it
+needed 4.
 RSS grows by half a KiB per job, which is bookkeeping growth, not a thread or a
 descriptor. The per-job cost of the daemon is negligible.
 
