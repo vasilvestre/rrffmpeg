@@ -53,6 +53,15 @@ curl -fsSL https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/scripts/i
 rrffmpeg --version
 ```
 
+No root is required. `sudo` is there only to write the default `/usr/local/bin`.
+Set `PREFIX` to install into a directory you own:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/scripts/install.sh | PREFIX=$HOME/.local/bin sh
+```
+
+The script stops with a message when the prefix is not writable.
+
 The agent path also needs `rrffmpeg-agent` on the worker:
 
 ```bash
@@ -86,6 +95,11 @@ sudo ln -sf /usr/local/bin/rrffmpeg /usr/local/bin/ffprobe
 
 Both names matter: Jellyfin finds `ffprobe` next to `ffmpeg`, so a missing
 `ffprobe` link breaks every probe.
+
+With a custom `PREFIX`, link inside that prefix and point Jellyfin at
+`$PREFIX/ffmpeg`. The user that runs Jellyfin must be able to read and execute
+it. A home directory often fails that test, because the Jellyfin unit may set
+`ProtectHome=true`. `/opt/rrffmpeg/bin` works when the prefix is shared.
 
 The client now runs `rrffmpeg` whenever Jellyfin calls `ffmpeg`. With no config
 file, `rrffmpeg` runs the local `ffmpeg` and changes nothing. That local binary

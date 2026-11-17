@@ -42,7 +42,11 @@ tar xzf "$tmp/$name.tar.gz" -C "$tmp"
 src="$tmp/$name"
 
 install_one() {
-  mkdir -p "$prefix"
+  mkdir -p "$prefix" 2>/dev/null || {
+    echo "install.sh: cannot write $prefix" >&2
+    echo "install.sh: rerun with sudo, or set PREFIX, for example PREFIX=\$HOME/.local/bin" >&2
+    exit 1
+  }
   # install unlinks first, so a job running on the old inode is not cut.
   if [ -f "$prefix/$1" ]; then cp -f "$prefix/$1" "$prefix/$1.prev"; fi
   install -m 755 "$src/$1" "$prefix/$1"

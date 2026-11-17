@@ -100,6 +100,31 @@ people running it have no maintained dispatcher.</p>
   <li><b>2.67x</b>realtime, 1080p SDR</li>
 </ul>
 
+<h2>Measured against rffmpeg</h2>
+
+<p>Same box, same ffmpeg 8.0.1, same SSH server, one session. Ffmpeg is replaced
+by <code>/bin/true</code> to isolate the dispatch, then the real
+<code>ffmpeg -version</code> runs. 60 samples per row, warm SSH connection.</p>
+
+<table>
+  <thead>
+    <tr><th>Dispatcher</th><th>Dispatch only, p50</th><th>ffmpeg -version, p50</th><th>p99</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>local ffmpeg</td><td>0.35 ms</td><td>24.18 ms</td><td>25.43 ms</td></tr>
+    <tr><td>rffmpeg, state on nvme</td><td>65.78 ms</td><td>117.26 ms</td><td>120.90 ms</td></tr>
+    <tr><td>rrffmpeg, SSH</td><td>7.23 ms</td><td>33.40 ms</td><td>37.63 ms</td></tr>
+    <tr><td>rrffmpeg, agent</td><td>1.56 ms</td><td>27.77 ms</td><td>30.37 ms</td></tr>
+  </tbody>
+</table>
+
+<p>rffmpeg spends about 55 ms before any transport: Python start, its imports
+and four SQLite commits. Its per-job health probe then opens a second SSH
+connection and starts ffmpeg twice, which is why a 24 ms probe becomes 117 ms.
+On the shared disk of the production box the same commit waited 2 to 4 seconds.
+The method, the raw runs and the rffmpeg config are in
+<a href="compare-rffmpeg.md">compare-rffmpeg.md</a>.</p>
+
 <h2>Features</h2>
 
 <ul>

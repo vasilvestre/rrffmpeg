@@ -269,6 +269,10 @@ Measured on 2026-11-17 on the production pair:
   with `tonemap_opencl`, 2.67x realtime on 1080p SDR.
 - A `bad`-host incident caused a full outage on a single-GPU-worker setup and
   required an external cron watchdog to clear the stale row.
+- Side by side on one box, dispatch with ffmpeg replaced by `/bin/true`: 65.78
+  ms p50 for rffmpeg, 7.23 ms for rrffmpeg over SSH and 1.56 ms through the
+  agent. With the real `ffmpeg -version`: 117.26 ms against 33.40 and 27.77 ms,
+  for a 24.18 ms local baseline. Raw runs in `docs/compare-rffmpeg.md`.
 
 ## Install
 
@@ -283,8 +287,21 @@ rrffmpeg --version
 
 The script checks the checksum, installs `rrffmpeg` and `rrffmpeg-stats`, links
 `ffmpeg` and `ffprobe`, keeps the previous binary as `rrffmpeg.prev`, and prints
-the version it installed. Run the same command to update. On a worker that uses
-the agent transport, install the daemon only:
+the version it installed. Run the same command to update.
+
+No root is required. `sudo` is there only to write the default `/usr/local/bin`.
+Set `PREFIX` to install as your own user:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/scripts/install.sh | PREFIX=$HOME/.local/bin sh
+```
+
+Then point Jellyfin at `$HOME/.local/bin/ffmpeg`. That directory must be readable
+by the user that runs Jellyfin, and `~/.local/bin` usually is not: many distros
+set `ProtectHome=true` on the Jellyfin unit, which hides every home directory.
+Use a shared path such as `/opt/rrffmpeg/bin` in that case.
+
+On a worker that uses the agent transport, install the daemon only:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/scripts/install.sh | sudo sh -s -- --agent
@@ -332,7 +349,8 @@ it from cron and keep the output, or point a log collector at the journal: it is
 one JSON object per line, and `--json` gives the same figures in one object.
 
 The benchmark behind the transport numbers, with its method and raw runs, is in
-`docs/latency.md`.
+`docs/latency.md`. The side-by-side against rffmpeg is in
+`docs/compare-rffmpeg.md`.
 
 ## Logging
 
