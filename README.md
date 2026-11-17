@@ -277,13 +277,25 @@ releases page, with a `.sha256` file next to each tarball. A static build needs
 no Rust toolchain and no matching glibc on the Jellyfin host.
 
 ```bash
-curl -LO https://github.com/vasilvestre/rrfmpeg/releases/latest/download/rrffmpeg-x86_64-unknown-linux-musl.tar.gz
-sha256sum -c rrffmpeg-x86_64-unknown-linux-musl.tar.gz.sha256
-tar xzf rrffmpeg-x86_64-unknown-linux-musl.tar.gz
-sudo install -m 755 rrffmpeg-x86_64-unknown-linux-musl/rrffmpeg /usr/local/bin/rrffmpeg
-sudo ln -sf /usr/local/bin/rrffmpeg /usr/local/bin/ffmpeg
-sudo ln -sf /usr/local/bin/rrffmpeg /usr/local/bin/ffprobe
+curl -fsSL https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/scripts/install.sh | sudo sh
+rrffmpeg --version
 ```
+
+The script checks the checksum, installs `rrffmpeg` and `rrffmpeg-stats`, links
+`ffmpeg` and `ffprobe`, keeps the previous binary as `rrffmpeg.prev`, and prints
+the version it installed. Run the same command to update. On a worker that uses
+the agent transport, install the daemon only:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/scripts/install.sh | sudo sh -s -- --agent
+rrffmpeg-agent --version
+```
+
+`--version` answers only under the `rrffmpeg` name. The `ffmpeg` symlink keeps
+passing `-version` and `--version` to the real ffmpeg, as Jellyfin expects.
+
+The tarball is still the source of truth. To install by hand, or to read what
+the script does, see [`INSTALL.md`](INSTALL.md).
 
 The two symlinks matter: Jellyfin finds `ffprobe` next to `ffmpeg`.
 

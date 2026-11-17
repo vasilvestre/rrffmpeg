@@ -8,7 +8,34 @@ permissions:
   contents: write
 
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A tag that does not match Cargo.toml ships a binary whose --version
+      # lies about the release it came from.
+      - name: Check the tag matches Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$version" = "$GITHUB_REF_NAME" || {
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
+            exit 1
+          }
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Test
+        run: cargo test --locked
+
   build:
+    needs: gate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -33,7 +60,7 @@ jobs:
           cp "target/${{ matrix.target }}/release/rrffmpeg" "$name/"
           cp "target/${{ matrix.target }}/release/rrffmpeg-agent" "$name/"
           cp "target/${{ matrix.target }}/release/rrffmpeg-stats" "$name/"
-          cp README.md config.example.toml "$name/"
+          cp README.md config.example.toml scripts/install.sh "$name/"
           tar czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
 

@@ -13,6 +13,7 @@ Each entry points at raw Markdown so a reader gets plain text.
 - [Measured dispatch latency](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/latency.md): how much the dispatcher adds to a transcode start, with the commands to repeat the measurement.
 - [Replay harness](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/replay.md): records real Jellyfin invocations and replays them through `rrffmpeg` to catch argument, quoting, stream wiring and exit code regressions.
 - [Example config](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/config.example.toml): a working pair of client and worker hosts.
+- [Install script](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/scripts/install.sh): downloads the latest release, checks the checksum, installs the binaries and the `ffmpeg` links, and keeps the previous binary for a rollback.
 
 ## Architecture decision records
 
@@ -30,6 +31,7 @@ Each entry points at raw Markdown so a reader gets plain text.
 - [0013 Retry a job that never started](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/adr/0013-retry-a-job-that-never-started.md): move an unstarted job to another host.
 - [0014 SSH connection persistence](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/adr/0014-ssh-connection-persistence.md): one long-lived ssh per host, so a job pays a channel open.
 - [0015 Journal replay](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/adr/0015-replay-waits-for-the-janitor.md): the replay runs when the janitor reads it, not at open.
+- [0016 Verifiable install and update](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/adr/0016-verifiable-install-and-update.md): `--version`, a tag check, one install script, and a protocol revision.
 
 ## Optional
 

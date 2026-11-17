@@ -44,16 +44,38 @@ appears, the worker cannot take a hardware job, and the install stops there.
 Both hosts get the same static binary. A `v*` tag publishes `x86_64` and
 `aarch64` builds for musl, with a `.sha256` file.
 
+Run the install script on the client. It picks the target from `uname -m`,
+checks the checksum, installs `rrffmpeg` and `rrffmpeg-stats`, links the two
+`ffmpeg` names, and prints the version it installed:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/scripts/install.sh | sudo sh
+rrffmpeg --version
+```
+
+The agent path also needs `rrffmpeg-agent` on the worker:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/scripts/install.sh | sudo sh -s -- --agent
+```
+
+Do this on the worker first, then on the client. The daemon and the client must
+speak the same protocol revision; a mismatch fails with a message that says so.
+
+To install by hand, the script does this:
+
 ```bash
 curl -LO https://github.com/vasilvestre/rrfmpeg/releases/latest/download/rrffmpeg-x86_64-unknown-linux-musl.tar.gz
+curl -LO https://github.com/vasilvestre/rrfmpeg/releases/latest/download/rrffmpeg-x86_64-unknown-linux-musl.tar.gz.sha256
 sha256sum -c rrffmpeg-x86_64-unknown-linux-musl.tar.gz.sha256
 tar xzf rrffmpeg-x86_64-unknown-linux-musl.tar.gz
 sudo install -m 755 rrffmpeg-x86_64-unknown-linux-musl/rrffmpeg /usr/local/bin/rrffmpeg
 sudo install -m 755 rrffmpeg-x86_64-unknown-linux-musl/rrffmpeg-stats /usr/local/bin/rrffmpeg-stats
 ```
 
-The agent path also needs `rrffmpeg-agent` on the worker. Install it the same
-way, then continue with step 4.
+The binary replaces its own inode, so a transcode already running keeps the old
+one and finishes. The install script also copies the old binary to
+`rrffmpeg.prev`; roll back with `mv /usr/local/bin/rrffmpeg.prev /usr/local/bin/rrffmpeg`.
 
 ## 3. Replace ffmpeg on the client
 
