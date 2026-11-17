@@ -275,6 +275,8 @@ mod tests {
             name: name.to_string(),
             concurrency,
             capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
+            ffmpeg_bin: None,
+            ffprobe_bin: None,
             paths: Vec::new(),
         }
     }

@@ -7,7 +7,7 @@
 //! On disk each event is one JSON object per line:
 //!
 //! ```text
-//! {"seq":1,"ts":1763300000123,"ev":{"kind":"started","job":"42-7","host":"virmire"}}
+//! {"seq":1,"ts":1763300000123,"ev":{"kind":"started","job":"42-7","host":"worker"}}
 //! ```
 //!
 //! `seq` orders the events and `ts` is wall-clock milliseconds. A truncated
@@ -487,27 +487,27 @@ mod tests {
     fn counters_are_correct_before_any_flush() {
         let dir = temp_dir("counters");
         let journal = Journal::open(&dir).unwrap();
-        journal.append(started("a", "virmire"));
-        journal.append(started("b", "virmire"));
-        journal.append(started("c", "caroline"));
+        journal.append(started("a", "worker"));
+        journal.append(started("b", "worker"));
+        journal.append(started("c", "client"));
         journal.append(Event::Finished {
             job: "a".into(),
             code: 0,
         });
 
-        assert_eq!(journal.active_on("virmire"), 1);
-        assert_eq!(journal.active_on("caroline"), 1);
+        assert_eq!(journal.active_on("worker"), 1);
+        assert_eq!(journal.active_on("client"), 1);
         let mut jobs = journal.active_jobs();
         jobs.sort();
         assert_eq!(
             jobs,
             vec![
-                ("b".to_string(), "virmire".to_string()),
-                ("c".to_string(), "caroline".to_string()),
+                ("b".to_string(), "worker".to_string()),
+                ("c".to_string(), "client".to_string()),
             ]
         );
         // Nothing forced the flusher, yet the counters are already right.
-        assert!(!journal.is_down("virmire"));
+        assert!(!journal.is_down("worker"));
     }
 
     #[test]
@@ -515,16 +515,16 @@ mod tests {
         let dir = temp_dir("reopen");
         {
             let journal = Journal::open(&dir).unwrap();
-            journal.append(started("a", "virmire"));
-            journal.append(started("b", "virmire"));
+            journal.append(started("a", "worker"));
+            journal.append(started("b", "worker"));
             journal.append(Event::HostDown {
-                host: "virmire".into(),
+                host: "worker".into(),
             });
             journal.flush().unwrap();
         }
         let journal = Journal::open(&dir).unwrap();
-        assert_eq!(journal.active_on("virmire"), 2);
-        assert!(journal.is_down("virmire"));
+        assert_eq!(journal.active_on("worker"), 2);
+        assert!(journal.is_down("worker"));
         assert_eq!(journal.active_jobs().len(), 2);
     }
 
@@ -533,22 +533,22 @@ mod tests {
         let dir = temp_dir("killed");
         {
             let journal = Journal::open(&dir).unwrap();
-            journal.append(started("orphan", "virmire"));
+            journal.append(started("orphan", "worker"));
             journal.flush().unwrap();
         }
         // SIGKILL skipped the Finished event: the row survives the restart.
         let journal = Journal::open(&dir).unwrap();
-        assert_eq!(journal.active_on("virmire"), 1);
+        assert_eq!(journal.active_on("worker"), 1);
 
         journal.append(Event::Reaped {
             job: "orphan".into(),
         });
         journal.flush().unwrap();
-        assert_eq!(journal.active_on("virmire"), 0);
+        assert_eq!(journal.active_on("worker"), 0);
 
         drop(journal);
         let journal = Journal::open(&dir).unwrap();
-        assert_eq!(journal.active_on("virmire"), 0);
+        assert_eq!(journal.active_on("worker"), 0);
         assert!(journal.active_jobs().is_empty());
     }
 
@@ -558,22 +558,22 @@ mod tests {
         {
             let journal = Journal::open(&dir).unwrap();
             journal.append(Event::HostDown {
-                host: "virmire".into(),
+                host: "worker".into(),
             });
             journal.flush().unwrap();
         }
         let journal = Journal::open(&dir).unwrap();
-        assert!(journal.is_down("virmire"));
+        assert!(journal.is_down("worker"));
 
         journal.append(Event::HostUp {
-            host: "virmire".into(),
+            host: "worker".into(),
         });
         journal.flush().unwrap();
-        assert!(!journal.is_down("virmire"));
+        assert!(!journal.is_down("worker"));
 
         drop(journal);
         let journal = Journal::open(&dir).unwrap();
-        assert!(!journal.is_down("virmire"));
+        assert!(!journal.is_down("worker"));
     }
 
     #[test]
@@ -581,19 +581,19 @@ mod tests {
         let dir = temp_dir("rotate");
         let journal = Journal::open_inner(&dir, SYNC_INTERVAL, 300).unwrap();
         for i in 0..20 {
-            journal.append(started(&format!("job{i}"), "virmire"));
+            journal.append(started(&format!("job{i}"), "worker"));
         }
         journal.flush().unwrap();
 
         assert!(dir.join("journal.1").exists(), "expected a rotated file");
         assert!(dir.join("journal").exists(), "expected a fresh active file");
-        assert_eq!(journal.active_on("virmire"), 20);
+        assert_eq!(journal.active_on("worker"), 20);
         assert_eq!(journal.active_jobs().len(), 20);
 
         // Rotated content and state both survive a restart.
         drop(journal);
         let journal = Journal::open(&dir).unwrap();
-        assert_eq!(journal.active_on("virmire"), 20);
+        assert_eq!(journal.active_on("worker"), 20);
     }
 
     #[test]
@@ -602,7 +602,7 @@ mod tests {
         let good = serde_json::to_string(&Record {
             seq: 1,
             ts: 0,
-            ev: started("a", "virmire"),
+            ev: started("a", "worker"),
         })
         .unwrap();
         let mut body = good;
@@ -611,16 +611,16 @@ mod tests {
         std::fs::write(dir.join(JOURNAL_NAME), body).unwrap();
 
         let journal = Journal::open(&dir).unwrap();
-        assert_eq!(journal.active_on("virmire"), 1);
+        assert_eq!(journal.active_on("worker"), 1);
         assert_eq!(
             journal.active_jobs(),
-            vec![("a".to_string(), "virmire".to_string())]
+            vec![("a".to_string(), "worker".to_string())]
         );
 
         // Unknown event kinds are skipped the same way.
-        journal.append(started("c", "virmire"));
+        journal.append(started("c", "worker"));
         journal.flush().unwrap();
-        assert_eq!(journal.active_on("virmire"), 2);
+        assert_eq!(journal.active_on("worker"), 2);
     }
 
     #[test]
@@ -632,7 +632,7 @@ mod tests {
             let journal = journal.clone();
             handles.push(thread::spawn(move || {
                 for i in 0..500 {
-                    journal.append(started(&format!("job-{t}-{i}"), "virmire"));
+                    journal.append(started(&format!("job-{t}-{i}"), "worker"));
                 }
             }));
         }
@@ -641,7 +641,7 @@ mod tests {
         }
         journal.flush().unwrap();
 
-        assert_eq!(journal.active_on("virmire"), 4000);
+        assert_eq!(journal.active_on("worker"), 4000);
         assert_eq!(journal.active_jobs().len(), 4000);
 
         let lines = records(&dir.join(JOURNAL_NAME));
@@ -659,7 +659,7 @@ mod tests {
         const N: usize = 2000;
         let start = Instant::now();
         for i in 0..N {
-            journal.append(started(&format!("job{i}"), "virmire"));
+            journal.append(started(&format!("job{i}"), "worker"));
         }
         let average = start.elapsed() / N as u32;
         println!("append average: {average:?} over {N} calls");
@@ -667,6 +667,6 @@ mod tests {
             average < Duration::from_millis(1),
             "append average {average:?} is too slow"
         );
-        assert_eq!(journal.active_on("virmire"), N);
+        assert_eq!(journal.active_on("worker"), N);
     }
 }

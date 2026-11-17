@@ -100,9 +100,11 @@ mod tests {
 
     fn host(paths: Vec<(&str, &str)>) -> Host {
         Host {
-            name: "virmire".into(),
+            name: "worker".into(),
             concurrency: 1,
             capabilities: vec![],
+            ffmpeg_bin: None,
+            ffprobe_bin: None,
             paths: paths
                 .into_iter()
                 .map(|(from, to)| PathMap {
@@ -115,8 +117,8 @@ mod tests {
 
     fn production() -> Host {
         host(vec![
-            ("/home/vasilves", "/home/my666/le4"),
-            ("/dev/shm/jellyfin-transcode", "/home/my666/transcode"),
+            ("/home/alice", "/home/bob/media"),
+            ("/dev/shm/jellyfin-transcode", "/home/bob/transcode"),
         ])
     }
 
@@ -128,8 +130,8 @@ mod tests {
     fn maps_media_to_the_worker_root() {
         let h = production();
         assert_eq!(
-            to_worker(&h, &os("/home/vasilves/media/film.mkv")),
-            os("/home/my666/le4/media/film.mkv")
+            to_worker(&h, &os("/home/alice/media/film.mkv")),
+            os("/home/bob/media/media/film.mkv")
         );
     }
 
@@ -137,7 +139,7 @@ mod tests {
     fn maps_hls_output_back_to_the_client_root() {
         let h = production();
         assert_eq!(
-            to_client(&h, &os("/home/my666/transcode/seg0001.ts")),
+            to_client(&h, &os("/home/bob/transcode/seg0001.ts")),
             os("/dev/shm/jellyfin-transcode/seg0001.ts")
         );
     }
@@ -145,7 +147,7 @@ mod tests {
     #[test]
     fn mapping_is_reversible() {
         let h = production();
-        let original = os("/home/vasilves/media/film.mkv");
+        let original = os("/home/alice/media/film.mkv");
         let there = to_worker(&h, &original);
         assert_eq!(to_client(&h, &there), original);
     }
@@ -161,43 +163,43 @@ mod tests {
     fn a_near_miss_parent_does_not_match() {
         let h = production();
         assert_eq!(
-            to_worker(&h, &os("/home/vasilvesx/film.mkv")),
-            os("/home/vasilvesx/film.mkv")
+            to_worker(&h, &os("/home/alicex/film.mkv")),
+            os("/home/alicex/film.mkv")
         );
     }
 
     #[test]
     fn longest_matching_prefix_wins() {
         let h = host(vec![
-            ("/home/vasilves", "/home/my666/le4"),
-            ("/home/vasilves/media", "/mnt/media"),
+            ("/home/alice", "/home/bob/media"),
+            ("/home/alice/media", "/mnt/media"),
         ]);
         assert_eq!(
-            to_worker(&h, &os("/home/vasilves/media/film.mkv")),
+            to_worker(&h, &os("/home/alice/media/film.mkv")),
             os("/mnt/media/film.mkv")
         );
         assert_eq!(
-            to_worker(&h, &os("/home/vasilves/other/film.mkv")),
-            os("/home/my666/le4/other/film.mkv")
+            to_worker(&h, &os("/home/alice/other/film.mkv")),
+            os("/home/bob/media/other/film.mkv")
         );
     }
 
     #[test]
     fn nested_rules_work_in_both_directions() {
         let h = host(vec![
-            ("/home/vasilves", "/home/my666/le4"),
-            ("/home/vasilves/media", "/mnt/media"),
+            ("/home/alice", "/home/bob/media"),
+            ("/home/alice/media", "/mnt/media"),
         ]);
         assert_eq!(
             to_client(&h, &os("/mnt/media/film.mkv")),
-            os("/home/vasilves/media/film.mkv")
+            os("/home/alice/media/film.mkv")
         );
     }
 
     #[test]
     fn unmapped_paths_pass_through_unchanged() {
         let h = production();
-        for p in ["-c:v", "libx264", "pipe:0", "/etc/passwd", "/home/vasilvs"] {
+        for p in ["-c:v", "libx264", "pipe:0", "/etc/passwd", "/home/mallory"] {
             assert_eq!(to_worker(&h, &os(p)), os(p));
             assert_eq!(to_client(&h, &os(p)), os(p));
         }
@@ -206,30 +208,30 @@ mod tests {
     #[test]
     fn an_exact_match_has_no_trailing_slash() {
         let h = production();
-        assert_eq!(to_worker(&h, &os("/home/vasilves")), os("/home/my666/le4"));
-        assert_eq!(to_client(&h, &os("/home/my666/le4")), os("/home/vasilves"));
+        assert_eq!(to_worker(&h, &os("/home/alice")), os("/home/bob/media"));
+        assert_eq!(to_client(&h, &os("/home/bob/media")), os("/home/alice"));
     }
 
     #[test]
     fn trailing_slashes_on_either_side_are_tolerated() {
-        let h = host(vec![("/home/vasilves/", "/home/my666/le4/")]);
+        let h = host(vec![("/home/alice/", "/home/bob/media/")]);
         assert_eq!(
-            to_worker(&h, &os("/home/vasilves/media/film.mkv")),
-            os("/home/my666/le4/media/film.mkv")
+            to_worker(&h, &os("/home/alice/media/film.mkv")),
+            os("/home/bob/media/media/film.mkv")
         );
-        assert_eq!(to_worker(&h, &os("/home/vasilves/")), os("/home/my666/le4"));
+        assert_eq!(to_worker(&h, &os("/home/alice/")), os("/home/bob/media"));
         assert_eq!(
-            to_client(&h, &os("/home/my666/le4/media/film.mkv")),
-            os("/home/vasilves/media/film.mkv")
+            to_client(&h, &os("/home/bob/media/media/film.mkv")),
+            os("/home/alice/media/film.mkv")
         );
     }
 
     #[test]
     fn a_non_utf8_name_survives_byte_for_byte() {
         let h = production();
-        let client = OsString::from_vec(b"/home/vasilves/f\xff\xfe.mkv".to_vec());
+        let client = OsString::from_vec(b"/home/alice/f\xff\xfe.mkv".to_vec());
         let worker = to_worker(&h, &client);
-        assert_eq!(worker.as_bytes(), b"/home/my666/le4/f\xff\xfe.mkv");
+        assert_eq!(worker.as_bytes(), b"/home/bob/media/f\xff\xfe.mkv");
         assert_eq!(to_client(&h, &worker).as_bytes(), client.as_bytes());
     }
 
@@ -237,8 +239,8 @@ mod tests {
     fn a_host_without_rules_rewrites_nothing() {
         let h = host(vec![]);
         assert_eq!(
-            to_worker(&h, &os("/home/vasilves/film.mkv")),
-            os("/home/vasilves/film.mkv")
+            to_worker(&h, &os("/home/alice/film.mkv")),
+            os("/home/alice/film.mkv")
         );
     }
 
@@ -246,8 +248,8 @@ mod tests {
     fn a_relative_argument_is_never_treated_as_absolute() {
         let h = production();
         assert_eq!(
-            to_worker(&h, &os("home/vasilves/film.mkv")),
-            os("home/vasilves/film.mkv")
+            to_worker(&h, &os("home/alice/film.mkv")),
+            os("home/alice/film.mkv")
         );
     }
 
@@ -256,8 +258,8 @@ mod tests {
         // Jellyfin sends `file:/abs/path`, never a bare path.
         let h = production();
         assert_eq!(
-            to_worker(&h, &os("file:/home/vasilves/media/film.mkv")),
-            os("file:/home/my666/le4/media/film.mkv")
+            to_worker(&h, &os("file:/home/alice/media/film.mkv")),
+            os("file:/home/bob/media/media/film.mkv")
         );
     }
 
@@ -265,12 +267,12 @@ mod tests {
     fn file_prefix_mapping_survives_dotnet_style_quotes_and_spaces() {
         let h = production();
         assert_eq!(
-            to_worker(&h, &os("file:\"/home/vasilves/my film.mkv\"")),
-            os("file:\"/home/my666/le4/my film.mkv\"")
+            to_worker(&h, &os("file:\"/home/alice/my film.mkv\"")),
+            os("file:\"/home/bob/media/my film.mkv\"")
         );
         assert_eq!(
-            to_worker(&h, &os("file:/home/vasilves/my film.mkv")),
-            os("file:/home/my666/le4/my film.mkv")
+            to_worker(&h, &os("file:/home/alice/my film.mkv")),
+            os("file:/home/bob/media/my film.mkv")
         );
     }
 
@@ -292,8 +294,8 @@ mod tests {
     fn the_reverse_direction_maps_a_file_token_too() {
         let h = production();
         assert_eq!(
-            to_client(&h, &os("file:/home/my666/le4/media/film.mkv")),
-            os("file:/home/vasilves/media/film.mkv")
+            to_client(&h, &os("file:/home/bob/media/media/film.mkv")),
+            os("file:/home/alice/media/film.mkv")
         );
     }
 }

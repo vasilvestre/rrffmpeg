@@ -48,9 +48,13 @@ impl Ssh {
     ///
     /// `$$` is not quoted: the remote shell expands it before `exec` replaces
     /// the shell with ffmpeg, so the pid in the file is the ffmpeg pid.
-    fn remote_command(&self, job: &Job, stderr_as_stdout: bool) -> Result<String> {
+    fn remote_command(&self, job: &Job, host: &Host, stderr_as_stdout: bool) -> Result<String> {
+        let program = match job.program {
+            crate::Program::Ffmpeg => host.ffmpeg_bin.as_deref().unwrap_or("ffmpeg"),
+            crate::Program::Ffprobe => host.ffprobe_bin.as_deref().unwrap_or("ffprobe"),
+        };
         let mut words: Vec<&str> = Vec::with_capacity(job.args.len() + 1);
-        words.push(job.program.binary());
+        words.push(program);
         for arg in &job.args {
             // A remote command is a shell string, so an argument that is not
             // valid UTF-8 cannot be carried without corrupting it.
@@ -85,13 +89,16 @@ pub fn shell_quote(s: &str) -> String {
 
 impl Transport for Ssh {
     fn run(&self, host: &Host, job: &Job, stderr_as_stdout: bool) -> Result<i32> {
-        let remote = self.remote_command(job, stderr_as_stdout)?;
+        let remote = self.remote_command(job, host, stderr_as_stdout)?;
         let status = Command::new(&self.ssh_bin)
             .arg("-T")
             .arg("-o")
             .arg("ServerAliveInterval=15")
-            .arg(&host.name)
+            // `--` closes the option list: the destination comes next, then
+            // the remote command. Putting it after the host would make ssh
+            // pass a literal `--` as the first word of the remote command.
             .arg("--")
+            .arg(&host.name)
             .arg(&remote)
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
@@ -118,8 +125,8 @@ impl Transport for Ssh {
             .arg("BatchMode=yes")
             .arg("-o")
             .arg(format!("ConnectTimeout={}", self.connect_timeout()))
-            .arg(&host.name)
             .arg("--")
+            .arg(&host.name)
             .arg("true")
             .output()
             .map(|out| out.status.success())
@@ -136,8 +143,8 @@ impl Transport for Ssh {
             .arg("BatchMode=yes")
             .arg("-o")
             .arg(format!("ConnectTimeout={}", self.connect_timeout()))
-            .arg(&host.name)
             .arg("--")
+            .arg(&host.name)
             .arg(&check)
             .output()
             .map(|out| out.status.success())
@@ -205,9 +212,11 @@ mod tests {
 
     fn host() -> Host {
         Host {
-            name: "virmire".into(),
+            name: "worker".into(),
             concurrency: 1,
             capabilities: vec![],
+            ffmpeg_bin: None,
+            ffprobe_bin: None,
             paths: vec![],
         }
     }
@@ -252,7 +261,7 @@ mod tests {
         let dir = fixture("shape");
         let s = ssh(dir.join("unused-ssh"), &dir);
         let remote = s
-            .remote_command(&job(&["a b", "it's", "$HOME", "x;y"]), false)
+            .remote_command(&job(&["a b", "it's", "$HOME", "x;y"]), &host(), false)
             .expect("remote command");
         let pid_dir = dir.join("pid");
         let pid_dir = pid_dir.display();
@@ -266,11 +275,33 @@ mod tests {
     }
 
     #[test]
+    fn a_host_can_override_the_remote_command() {
+        let dir = fixture("override");
+        let s = ssh(dir.join("unused-ssh"), &dir);
+        let mut h = host();
+        h.ffmpeg_bin = Some("/home/bob/.bin/rrj/jellyfin-ffmpeg.sh".into());
+        let remote = s.remote_command(&job(&["-version"]), &h, false).unwrap();
+        assert!(remote.ends_with("exec '/home/bob/.bin/rrj/jellyfin-ffmpeg.sh' '-version'"));
+        // ffprobe keeps its own default.
+        let mut j = job(&["-version"]);
+        j.program = Program::Ffprobe;
+        assert!(
+            s.remote_command(&j, &h, false)
+                .unwrap()
+                .contains("exec 'ffprobe'")
+        );
+    }
+
+    #[test]
     fn the_redirect_is_added_only_when_asked() {
         let dir = fixture("redirect");
         let s = ssh(dir.join("unused-ssh"), &dir);
-        let plain = s.remote_command(&job(&["-v", "error"]), false).unwrap();
-        let merged = s.remote_command(&job(&["-v", "error"]), true).unwrap();
+        let plain = s
+            .remote_command(&job(&["-v", "error"]), &host(), false)
+            .unwrap();
+        let merged = s
+            .remote_command(&job(&["-v", "error"]), &host(), true)
+            .unwrap();
         assert!(!plain.contains("2>&1"));
         assert!(merged.ends_with(" 2>&1"));
         assert!(merged.starts_with("mkdir -p "));
@@ -292,8 +323,8 @@ mod tests {
         assert_eq!(v[0], "-T");
         assert_eq!(v[1], "-o");
         assert_eq!(v[2], "ServerAliveInterval=15");
-        assert_eq!(v[3], "virmire");
-        assert_eq!(v[4], "--");
+        assert_eq!(v[3], "--");
+        assert_eq!(v[4], "worker");
         assert_eq!(v.len(), 6);
         assert!(v[5].starts_with("mkdir -p "));
         assert!(v[5].contains("job1.pid"));
@@ -348,8 +379,8 @@ mod tests {
                 "BatchMode=yes",
                 "-o",
                 "ConnectTimeout=5",
-                "virmire",
                 "--",
+                "worker",
                 "true"
             ]
         );
@@ -401,6 +432,6 @@ mod tests {
         let mut job = job(&["-i"]);
         job.args.push(OsString::from_vec(b"bad\xff".to_vec()));
 
-        assert!(s.remote_command(&job, false).is_err());
+        assert!(s.remote_command(&job, &host(), false).is_err());
     }
 }

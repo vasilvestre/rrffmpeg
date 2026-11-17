@@ -222,6 +222,8 @@ mod tests {
             name: name.to_string(),
             concurrency: 1,
             capabilities: Vec::new(),
+            ffmpeg_bin: None,
+            ffprobe_bin: None,
             paths: Vec::new(),
         }
     }
@@ -262,10 +264,10 @@ mod tests {
         let dir = tempdir("reap");
         let journal = Arc::new(Journal::open(&dir).expect("journal"));
         assert!(
-            start(&journal, "j1", "virmire"),
+            start(&journal, "j1", "worker"),
             "the journal does not report the Started job as active"
         );
-        let scheduler = Arc::new(Scheduler::new(vec![host("virmire")]));
+        let scheduler = Arc::new(Scheduler::new(vec![host("worker")]));
         let transport = Arc::new(FakeTransport::new(true, false));
 
         let janitor = Janitor::spawn(
@@ -291,10 +293,10 @@ mod tests {
         let dir = tempdir("alive");
         let journal = Arc::new(Journal::open(&dir).expect("journal"));
         assert!(
-            start(&journal, "j1", "virmire"),
+            start(&journal, "j1", "worker"),
             "the journal does not report the Started job as active"
         );
-        let scheduler = Arc::new(Scheduler::new(vec![host("virmire")]));
+        let scheduler = Arc::new(Scheduler::new(vec![host("worker")]));
         let transport = Arc::new(FakeTransport::new(true, true));
 
         let janitor = Janitor::spawn(
@@ -323,8 +325,8 @@ mod tests {
     fn a_down_host_that_probes_true_is_marked_up() {
         let dir = tempdir("host-up");
         let journal = Arc::new(Journal::open(&dir).expect("journal"));
-        let scheduler = Arc::new(Scheduler::new(vec![host("virmire")]));
-        scheduler.mark_down("virmire");
+        let scheduler = Arc::new(Scheduler::new(vec![host("worker")]));
+        scheduler.mark_down("worker");
         let transport = Arc::new(FakeTransport::new(true, true));
 
         let janitor = Janitor::spawn(
@@ -335,11 +337,11 @@ mod tests {
         );
 
         let ok = wait_until(|| {
-            transport.probes.load(Ordering::SeqCst) >= 1 && !scheduler.is_down("virmire")
+            transport.probes.load(Ordering::SeqCst) >= 1 && !scheduler.is_down("worker")
         });
         janitor.stop();
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(!scheduler.is_down("virmire"), "the host is still down");
+        assert!(!scheduler.is_down("worker"), "the host is still down");
         assert!(ok, "the host was never probed");
     }
 
@@ -347,7 +349,7 @@ mod tests {
     fn a_live_host_whose_probe_fails_is_marked_down() {
         let dir = tempdir("host-down");
         let journal = Arc::new(Journal::open(&dir).expect("journal"));
-        let scheduler = Arc::new(Scheduler::new(vec![host("virmire")]));
+        let scheduler = Arc::new(Scheduler::new(vec![host("worker")]));
         let transport = Arc::new(FakeTransport::new(false, true));
 
         let janitor = Janitor::spawn(
@@ -358,19 +360,19 @@ mod tests {
         );
 
         let ok = wait_until(|| {
-            transport.probes.load(Ordering::SeqCst) >= 1 && scheduler.is_down("virmire")
+            transport.probes.load(Ordering::SeqCst) >= 1 && scheduler.is_down("worker")
         });
         janitor.stop();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(ok, "the failing host was never marked down");
-        assert!(scheduler.is_down("virmire"), "the host is still marked up");
+        assert!(scheduler.is_down("worker"), "the host is still marked up");
     }
 
     #[test]
     fn stop_returns_promptly_with_a_long_interval() {
         let dir = tempdir("stop");
         let journal = Arc::new(Journal::open(&dir).expect("journal"));
-        let scheduler = Arc::new(Scheduler::new(vec![host("virmire")]));
+        let scheduler = Arc::new(Scheduler::new(vec![host("worker")]));
         let transport = Arc::new(FakeTransport::new(true, true));
 
         let janitor = Janitor::spawn(scheduler, journal, transport, Duration::from_secs(3600));

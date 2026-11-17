@@ -61,10 +61,14 @@ fn run() -> Result<i32> {
         capability: required_capability(&args),
     };
 
-    let lease = match scheduler.acquire_blocking(&job, Duration::from_secs(30)) {
+    let wait = Duration::from_secs(config.queue_wait_secs);
+    let lease = match scheduler.acquire_blocking(&job, wait) {
         Some(lease) => lease,
         None => {
-            eprintln!("rrffmpeg: no worker slot after 30s, running locally");
+            eprintln!(
+                "rrffmpeg: no worker slot after {}s, running locally",
+                config.queue_wait_secs
+            );
             return run_local(&config, program, &args, stderr_as_stdout);
         }
     };

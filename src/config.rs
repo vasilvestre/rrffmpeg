@@ -20,6 +20,11 @@ fn default_state_dir() -> PathBuf {
     base.join("rrffmpeg")
 }
 
+/// How long a job waits for a free worker slot before running locally.
+fn default_queue_wait() -> u64 {
+    600
+}
+
 fn default_ssh() -> PathBuf {
     PathBuf::from("ssh")
 }
@@ -58,7 +63,7 @@ pub struct PathMap {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Host {
-    /// `ssh` destination: `virmire`, `user@virmire`, or an IP.
+    /// `ssh` destination: `worker`, `user@worker`, or an IP.
     pub name: String,
     /// Maximum jobs sent to this host at once.
     #[serde(default = "one")]
@@ -66,6 +71,12 @@ pub struct Host {
     /// Advertised accelerators: `vaapi`, `nvenc`, `qsv`. Empty accepts any job.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Remote ffmpeg command. Defaults to `ffmpeg` from the worker PATH; point
+    /// it at a wrapper that sets the OpenCL environment.
+    #[serde(default)]
+    pub ffmpeg_bin: Option<String>,
+    #[serde(default)]
+    pub ffprobe_bin: Option<String>,
     #[serde(default)]
     pub paths: Vec<PathMap>,
 }
@@ -85,6 +96,10 @@ pub struct Config {
     pub local_ffmpeg: PathBuf,
     #[serde(default = "default_ffprobe")]
     pub local_ffprobe: PathBuf,
+    /// Seconds to wait for a worker slot. Jellyfin queues its own jobs, so a
+    /// long wait beats running a transcode on a host with no GPU.
+    #[serde(default = "default_queue_wait")]
+    pub queue_wait_secs: u64,
 }
 
 impl Default for Config {
@@ -96,6 +111,7 @@ impl Default for Config {
             ssh_bin: default_ssh(),
             local_ffmpeg: default_ffmpeg(),
             local_ffprobe: default_ffprobe(),
+            queue_wait_secs: default_queue_wait(),
         }
     }
 }
@@ -146,13 +162,13 @@ mod tests {
 stderr_as_stdout = true
 
 [[hosts]]
-name = "virmire"
+name = "worker"
 concurrency = 2
 capabilities = ["vaapi"]
 
 [[hosts.paths]]
-from = "/home/vasilves/media"
-to = "/home/my666/le4"
+from = "/home/alice/media"
+to = "/home/bob/media"
 "#,
         )
         .unwrap();
@@ -160,7 +176,7 @@ to = "/home/my666/le4"
         assert_eq!(cfg.hosts.len(), 1);
         assert_eq!(cfg.hosts[0].concurrency, 2);
         assert_eq!(cfg.hosts[0].capabilities, vec!["vaapi".to_string()]);
-        assert_eq!(cfg.hosts[0].paths[0].to, PathBuf::from("/home/my666/le4"));
+        assert_eq!(cfg.hosts[0].paths[0].to, PathBuf::from("/home/bob/media"));
     }
 
     #[test]
