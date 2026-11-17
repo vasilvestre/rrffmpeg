@@ -10,7 +10,7 @@
 set -eu
 
 owner=vasilvestre
-repo=rrfmpeg
+repo=rrffmpeg
 prefix=${PREFIX:-/usr/local/bin}
 want=client
 for arg in "$@"; do

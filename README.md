@@ -277,7 +277,7 @@ releases page, with a `.sha256` file next to each tarball. A static build needs
 no Rust toolchain and no matching glibc on the Jellyfin host.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/scripts/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/scripts/install.sh | sudo sh
 rrffmpeg --version
 ```
 
@@ -287,7 +287,7 @@ the version it installed. Run the same command to update. On a worker that uses
 the agent transport, install the daemon only:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/scripts/install.sh | sudo sh -s -- --agent
+curl -fsSL https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/scripts/install.sh | sudo sh -s -- --agent
 rrffmpeg-agent --version
 ```
 

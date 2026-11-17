@@ -49,14 +49,14 @@ checks the checksum, installs `rrffmpeg` and `rrffmpeg-stats`, links the two
 `ffmpeg` names, and prints the version it installed:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/scripts/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/scripts/install.sh | sudo sh
 rrffmpeg --version
 ```
 
 The agent path also needs `rrffmpeg-agent` on the worker:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/scripts/install.sh | sudo sh -s -- --agent
+curl -fsSL https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/scripts/install.sh | sudo sh -s -- --agent
 ```
 
 Do this on the worker first, then on the client. The daemon and the client must
@@ -65,8 +65,8 @@ speak the same protocol revision; a mismatch fails with a message that says so.
 To install by hand, the script does this:
 
 ```bash
-curl -LO https://github.com/vasilvestre/rrfmpeg/releases/latest/download/rrffmpeg-x86_64-unknown-linux-musl.tar.gz
-curl -LO https://github.com/vasilvestre/rrfmpeg/releases/latest/download/rrffmpeg-x86_64-unknown-linux-musl.tar.gz.sha256
+curl -LO https://github.com/vasilvestre/rrffmpeg/releases/latest/download/rrffmpeg-x86_64-unknown-linux-musl.tar.gz
+curl -LO https://github.com/vasilvestre/rrffmpeg/releases/latest/download/rrffmpeg-x86_64-unknown-linux-musl.tar.gz.sha256
 sha256sum -c rrffmpeg-x86_64-unknown-linux-musl.tar.gz.sha256
 tar xzf rrffmpeg-x86_64-unknown-linux-musl.tar.gz
 sudo install -m 755 rrffmpeg-x86_64-unknown-linux-musl/rrffmpeg /usr/local/bin/rrffmpeg
