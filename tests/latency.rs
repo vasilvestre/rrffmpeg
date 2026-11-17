@@ -290,12 +290,20 @@ fn journal_replay_at_rotation_cap() {
         records += 1;
         let id = format!("{}-{}", 31_000 + records % 97, records);
         let ev = if records.is_multiple_of(2) {
-            Event::Finished { job: id, code: 0 }
+            Event::Finished {
+                job: id,
+                code: 0,
+                host: "worker".into(),
+                dur_us: 1000,
+                stats: Box::default(),
+            }
         } else {
             Event::Started {
                 job: id,
                 host: "worker".into(),
                 elapsed_us: 400 + records % 900,
+                program: "ffmpeg".into(),
+                in_flight: 1,
             }
         };
         let line = serde_json::to_string(&Record {

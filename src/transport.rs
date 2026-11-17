@@ -7,6 +7,7 @@
 //! worker as literal bytes.
 
 use crate::{Error, Host, Job, Result};
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -163,10 +164,39 @@ fn probe_command(host: &Host) -> String {
         .join(" && ")
 }
 
+/// Copy one stream to this process's own, byte for byte and as it arrives.
+/// `tap` also feeds the progress parser: ffmpeg writes the job's fps and speed
+/// on stderr, so the only way to keep them is to read the stream that
+/// `inherit` used to hand straight to Jellyfin.
+fn relay(
+    mut src: impl Read + Send + 'static,
+    mut dst: impl Write + Send + 'static,
+    tap: bool,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut buf = vec![0u8; 16 * 1024];
+        loop {
+            match src.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if tap {
+                        crate::progress::feed(&buf[..n]);
+                    }
+                    if dst.write_all(&buf[..n]).is_ok() {
+                        let _ = dst.flush();
+                    }
+                    // A closed sink (Jellyfin went away) must not stop the
+                    // drain: the worker would block on a full pipe.
+                }
+            }
+        }
+    })
+}
+
 impl Transport for Ssh {
     fn run(&self, host: &Host, job: &Job, stderr_as_stdout: bool) -> Result<i32> {
         let remote = self.remote_command(job, host, stderr_as_stdout)?;
-        let status = Command::new(&self.ssh_bin)
+        let mut child = Command::new(&self.ssh_bin)
             .arg("-T")
             .arg("-o")
             .arg("ServerAliveInterval=15")
@@ -179,10 +209,25 @@ impl Transport for Ssh {
             .arg(&host.name)
             .arg(&remote)
             .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|e| Error::Io(e, format!("running {}", self.ssh_bin.display())))?;
+        // With `stderr_as_stdout` the worker merges its stderr into stdout, so
+        // the tapped stream is the other one.
+        let mut relays = Vec::with_capacity(2);
+        if let Some(out) = child.stdout.take() {
+            relays.push(relay(out, std::io::stdout(), stderr_as_stdout));
+        }
+        if let Some(err) = child.stderr.take() {
+            relays.push(relay(err, std::io::stderr(), !stderr_as_stdout));
+        }
+        let status = child
+            .wait()
+            .map_err(|e| Error::Io(e, format!("waiting on {}", self.ssh_bin.display())))?;
+        for relay in relays {
+            let _ = relay.join();
+        }
         // Exit code 255 is ssh's own failure (unreachable host, dropped link),
         // not ffmpeg's. A signal-terminated ssh has no code either. Either way
         // this is a transport failure, and the journal must not record it as a

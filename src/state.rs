@@ -36,7 +36,45 @@ const SYNC_INTERVAL: Duration = Duration::from_millis(500);
 /// Bound on the wait for a flush ack, so a wedged flusher cannot hang forever.
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The numbers read from the worker's own stderr, all optional: a job run with
+/// `-loglevel error` or `-nostats` prints none of them.
+///
+/// `src_hdr` is empty for SDR and names the transfer function otherwise, so a
+/// dashboard can count HDR jobs. Widths are pixels, `speed` is times realtime,
+/// `kbps` is the output bitrate.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Stats {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kbps: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_w: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_h: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_codec: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_hdr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dst_w: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dst_h: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dst_codec: Option<String>,
+    /// `copy` or `encode` per output stream kind, read from ffmpeg's stream
+    /// mapping. A video copy is a direct stream; an encode is a transcode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
     Started {
@@ -50,10 +88,34 @@ pub enum Event {
         /// replaying, and their dispatch time was never measured.
         #[serde(default)]
         elapsed_us: u64,
+        /// `ffmpeg` or `ffprobe`, so a dashboard can split the probes that
+        /// flood Jellyfin's log from the transcodes that cost the time.
+        /// Defaulted for journals written before it existed.
+        #[serde(default)]
+        program: String,
+        /// Jobs already running on that host when this one started, this one
+        /// included. Compare with the host's `concurrency` to read saturation.
+        #[serde(default)]
+        in_flight: usize,
     },
     Finished {
         job: String,
         code: i32,
+        /// The worker that ran it, repeated here so a failed job is counted
+        /// per host without joining two lines.
+        #[serde(default)]
+        host: String,
+        /// The transport call, in microseconds: what the worker spent on the
+        /// job. `rrffmpeg-stats` derives the same number from the timestamps,
+        /// which Loki cannot join.
+        #[serde(default)]
+        dur_us: u64,
+        /// What the worker's ffmpeg printed about the job: its speed, and the
+        /// shape of the source and the output. Flattened so one line holds
+        /// `ev.fps`, `ev.src_w` and the rest, and empty when the job printed
+        /// nothing to read. Boxed so the common `Started` variant stays small.
+        #[serde(flatten)]
+        stats: Box<Stats>,
     },
     HostDown {
         host: String,
@@ -587,6 +649,8 @@ mod tests {
             job: job.into(),
             host: host.into(),
             elapsed_us: 0,
+            program: "ffmpeg".into(),
+            in_flight: 1,
         }
     }
 
@@ -608,6 +672,9 @@ mod tests {
         journal.append(Event::Finished {
             job: "a".into(),
             code: 0,
+            host: "worker".into(),
+            dur_us: 0,
+            stats: Box::default(),
         });
 
         assert_eq!(journal.active_on("worker"), 1);

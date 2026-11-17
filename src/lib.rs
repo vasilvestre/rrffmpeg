@@ -6,6 +6,7 @@ pub mod janitor;
 pub mod locks;
 pub mod log;
 pub mod paths;
+pub mod progress;
 pub mod queue;
 pub mod scheduler;
 pub mod state;

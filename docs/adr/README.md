@@ -31,5 +31,6 @@ ADR-NNNN` and add the new record.
 | [0019](0019-refuse-the-local-fallback-for-ffmpeg.md) | Refuse the local fallback for a transcode, keep it for a probe | Accepted |
 | [0020](0020-ssh-arguments-in-config.md) | SSH arguments in the config, not in a wrapper script | Accepted |
 | [0021](0021-per-host-environment.md) | Per-host environment, and agent protocol 2 | Accepted |
+| [0022](0022-progress-sample-in-the-journal.md) | The journal records fps, speed, content and copy-or-encode per stream | Accepted |
 
 All records dated 2026-11-17.

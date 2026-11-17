@@ -15,7 +15,7 @@ Each entry points at raw Markdown so a reader gets plain text.
 - [Measurer](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/scripts/measure.py): 5 warmup runs, N samples, nearest-rank percentiles, used by both benchmark pages.
 - [Replay harness](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/replay.md): records real Jellyfin invocations and replays them through `rrffmpeg` to catch argument, quoting, stream wiring and exit code regressions.
 - [Example config](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/config.example.toml): a working pair of client and worker hosts.
-- [Release 0.6.0](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/releases/0.6.0.md): the local fallback switch, ssh arguments in the config, and per-host environment.
+- [Release 0.7.0](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/releases/0.7.0.md): the journal records fps, speed, source and output shape, and copy or encode per stream.
 - [Install script](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/scripts/install.sh): downloads the latest release, checks the checksum, installs the binaries and the `ffmpeg` links, and keeps the previous binary for a rollback.
 
 ## Architecture decision records
@@ -40,6 +40,7 @@ Each entry points at raw Markdown so a reader gets plain text.
 - [0019 Refuse the local fallback](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0019-refuse-the-local-fallback-for-ffmpeg.md): a transcode fails instead of encoding on a client with no GPU; a probe still falls back.
 - [0020 SSH arguments in config](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0020-ssh-arguments-in-config.md): a per-host key without a wrapper script.
 - [0021 Per-host environment](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0021-per-host-environment.md): the worker wrapper becomes a config table, and the agent protocol moves to revision 2.
+- [0022 Progress sample in the journal](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0022-progress-sample-in-the-journal.md): fps, speed, source and output shape, and copy or encode per stream, read from the worker's stderr and shipped to Loki.
 
 ## Optional
 

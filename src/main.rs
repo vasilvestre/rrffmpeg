@@ -190,13 +190,22 @@ fn dispatch(
             job: mapped.id.clone(),
             host: lease.host.name.clone(),
             elapsed_us: start.elapsed().as_micros() as u64,
+            program: mapped.program.binary().to_string(),
+            // This job is not in the journal yet, so the count is one short.
+            in_flight: journal.active_on(&lease.host.name) + 1,
         });
 
+        let started = std::time::Instant::now();
         match transport.run(&lease.host, &mapped, stderr_as_stdout) {
             Ok(code) => {
                 journal.append(Event::Finished {
                     job: mapped.id.clone(),
                     code,
+                    host: lease.host.name.clone(),
+                    dur_us: started.elapsed().as_micros() as u64,
+                    // Taken here, once, so a retry below starts with an empty
+                    // slot instead of inheriting the failed attempt's lines.
+                    stats: Box::new(rrffmpeg::progress::take()),
                 });
                 // Free the slot before returning so the next job can start at once.
                 drop(lease);

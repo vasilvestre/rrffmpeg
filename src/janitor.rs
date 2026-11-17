@@ -284,6 +284,8 @@ mod tests {
             job: job.to_string(),
             host: host_name.to_string(),
             elapsed_us: 0,
+            program: "ffmpeg".to_string(),
+            in_flight: 1,
         });
         journal
             .active_jobs()

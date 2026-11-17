@@ -582,6 +582,7 @@ impl Agent {
                 }
                 Ok((STDERR, body)) => {
                     stderr_bytes += body.len();
+                    crate::progress::feed(&body);
                     let sink: &mut dyn Write = if stderr_as_stdout {
                         &mut *out
                     } else {
