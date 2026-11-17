@@ -36,7 +36,7 @@ cargo test --release --test latency -- --ignored --nocapture
    run, 5 warmup runs are dropped, then 60 samples are kept.
 
 ```bash
-cd /tmp/opencode/lat
+cd /tmp/lat
 printf "local ffmpeg          "; ./measure.sh 60 /usr/bin/ffmpeg -version
 printf "rrffmpeg passthrough  "; RRFFMPEG_CONFIG=$PWD/local.toml  ./measure.sh 60 ./bin/ffmpeg -version
 printf "rrffmpeg + agent      "; RRFFMPEG_CONFIG=$PWD/config.toml ./measure.sh 60 ./bin/ffmpeg -version
@@ -106,7 +106,11 @@ different way to answer `active_on`, so it is not done.
   connection instead of one ssh process plus a probe), not from this sheet.
 - A GPU worker. Nothing here transcodes.
 - The production success criterion, p99 under 50 ms for a week. This is one
-  box, one hour.
+  box, one hour. The in-flight measure for that is `rrffmpeg-stats`, which reads
+  the journal the dispatcher already writes: `dispatch` is microseconds from
+  process start to the job going out, `duration` is the gap between the
+  `started` and `finished` events. It stops at the transport, so it is a lower
+  bound on what a client feels.
 
 Next:
 

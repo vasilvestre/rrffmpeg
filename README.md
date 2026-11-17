@@ -259,6 +259,38 @@ sudo ln -sf /usr/local/bin/rrffmpeg /usr/local/bin/ffprobe
 
 The two symlinks matter: Jellyfin finds `ffprobe` next to `ffmpeg`.
 
+## Measure it in production
+
+Every invocation appends to the journal, so the numbers are already on disk.
+`rrffmpeg-stats` reads them back, rotated files included, and prints percentiles:
+
+```bash
+rrffmpeg-stats                      # state_dir comes from your config
+rrffmpeg-stats --dir /dev/shm/rrffmpeg --json
+```
+
+```text
+journal /home/alice/.local/state/rrffmpeg
+records 26  jobs 13  open 0  reaped 0
+dispatch  n=13    p50 217 us    p95 276 us    p99 276 us    max 276 us
+duration  n=13    p50 26.25 ms  p95 29.21 ms  p99 29.21 ms  max 29.21 ms
+exit codes  0:13
+host worker  jobs 13  failed 0  down 0  up 0
+```
+
+`dispatch` is microseconds from process start to the moment the job went to the
+worker: config, the journal replay and the slot file. The transport, the daemon
+and rrffmpeg's own exit are outside it. `duration` is the gap between the
+`started` and `finished` events, so it is the job itself.
+
+What it does not measure: the delay Jellyfin sees before the first frame, and
+anything on the worker beyond the process lifetime. For the week-long test, run
+it from cron and keep the output, or point a log collector at the journal: it is
+one JSON object per line, and `--json` gives the same figures in one object.
+
+The benchmark behind the transport numbers, with its method and raw runs, is in
+`docs/latency.md`.
+
 ## Next
 
 ```bash
