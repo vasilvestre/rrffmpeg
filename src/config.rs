@@ -104,6 +104,9 @@ pub struct Config {
     /// Shared secret of the agent daemon. `RRFFMPEG_AGENT_TOKEN` wins.
     #[serde(default)]
     pub agent_token: Option<String>,
+    /// PEM of the daemon certificate, the only trust anchor for the agent.
+    #[serde(default)]
+    pub agent_cert: Option<PathBuf>,
     #[serde(default = "default_ffmpeg")]
     pub local_ffmpeg: PathBuf,
     #[serde(default = "default_ffprobe")]
@@ -126,6 +129,7 @@ impl Default for Config {
             state_dir: default_state_dir(),
             ssh_bin: default_ssh(),
             agent_token: None,
+            agent_cert: None,
             local_ffmpeg: default_ffmpeg(),
             local_ffprobe: default_ffprobe(),
             queue_wait_secs: default_queue_wait(),

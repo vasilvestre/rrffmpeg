@@ -18,6 +18,7 @@ ADR-NNNN` and add the new record.
 | [0006](0006-placement-caps-and-wait.md) | Per-host concurrency plus capability match, wait then local | Superseded by [0008](0008-cross-process-slots.md) |
 | [0007](0007-pid-file-liveness.md) | Per-job pid file for liveness | Accepted |
 | [0008](0008-cross-process-slots.md) | Cross-process slot files and an expiring down verdict | Accepted |
-| [0009](0009-agent-transport.md) | An agent transport, one TCP connection per job | Accepted |
+| [0009](0009-agent-transport.md) | An agent daemon as a second transport | Accepted, transport superseded by [0010](0010-agent-tls.md) |
+| [0010](0010-agent-tls.md) | TLS with one pinned certificate, one connection per direction | Accepted |
 
 All records dated 2026-11-17.

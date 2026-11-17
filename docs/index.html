@@ -146,7 +146,32 @@ sudo ln -sf /usr/local/bin/rrffmpeg /usr/local/bin/ffmpeg
 sudo ln -sf /usr/local/bin/rrffmpeg /usr/local/bin/ffprobe</code></pre>
 
 <p>The same tarball carries <code>rrffmpeg-agent</code> for the worker. Copy it
-there only if you want the agent transport instead of SSH.</p>
+there only if you want the agent transport instead of SSH. It speaks TLS, and
+the client trusts exactly one certificate: the daemon's own.</p>
+
+<p>Generate the certificate on the worker. List every name and address a
+client uses to reach it:</p>
+
+<pre><code>rrffmpeg-agent --init ~/.config/rrffmpeg --san worker --san 10.8.0.2</code></pre>
+
+<p>That writes <code>cert.pem</code> and <code>key.pem</code>, the key mode
+0600. Start the daemon with a long random token:</p>
+
+<pre><code>RRFFMPEG_AGENT_TOKEN=change-me rrffmpeg-agent \
+    --listen 10.8.0.2:9876 \
+    --cert ~/.config/rrffmpeg/cert.pem \
+    --key ~/.config/rrffmpeg/key.pem</code></pre>
+
+<p>Copy <code>cert.pem</code> to the client over a channel you already trust:
+it is the only thing between the client and an impostor. Then set
+<code>agent_token</code> and <code>agent_cert</code> on the client, and
+<code>agent_addr</code> on the host. Hosts without <code>agent_addr</code>
+keep using SSH, so one config can mix both.</p>
+
+<p>The certificate proves the daemon to the client. The token proves the
+client to the daemon, and a stolen token still works from any host that
+reaches the address, so keep the listener on a private network until mTLS
+exists.</p>
 
 <p>Point Jellyfin at <code>/usr/local/bin/ffmpeg</code>. Without a config file
 the binary runs the local ffmpeg and does nothing else, so the install is safe
@@ -171,6 +196,7 @@ below.</p>
     <tr><td><code>stderr_as_stdout</code></td><td><code>false</code></td><td>Copy ffmpeg stderr to stdout, for Jellyfin builds that read probe output there.</td></tr>
     <tr><td><code>ssh_bin</code></td><td><code>ssh</code></td><td>SSH client used for hosts without <code>agent_addr</code>.</td></tr>
     <tr><td><code>agent_token</code></td><td>none</td><td>Shared secret of the agent daemon. <code>RRFFMPEG_AGENT_TOKEN</code> wins over it. Required if any host sets <code>agent_addr</code>.</td></tr>
+    <tr><td><code>agent_cert</code></td><td>none</td><td>PEM of the daemon certificate, the only trust anchor for the agent transport. Required with <code>agent_token</code> if any host sets <code>agent_addr</code>.</td></tr>
     <tr><td><code>local_ffmpeg</code></td><td><code>ffmpeg</code></td><td>Binary used when a job runs locally. Point it away from the symlink or you loop.</td></tr>
     <tr><td><code>local_ffprobe</code></td><td><code>ffprobe</code></td><td>Same, for ffprobe.</td></tr>
   </tbody>
@@ -181,12 +207,12 @@ below.</p>
 <table>
   <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
   <tbody>
-    <tr><td><code>name</code></td><td>required</td><td>SSH target: a hostname or an alias from <code>~/.ssh/config</code>.</td></tr>
+    <tr><td><code>name</code></td><td>required</td><td>SSH target: a hostname or an alias from <code>~/.ssh/config</code>. With <code>agent_addr</code> it is only a label and a seed for the slot lock file.</td></tr>
     <tr><td><code>concurrency</code></td><td><code>1</code></td><td>Slots on this host. Each slot is an exclusive lock file, so a forked job cannot exceed it.</td></tr>
     <tr><td><code>capabilities</code></td><td><code>[]</code></td><td>Advertised encoders, for example <code>["vaapi"]</code>.</td></tr>
     <tr><td><code>ffmpeg_bin</code></td><td>inherited</td><td>ffmpeg path on the worker.</td></tr>
     <tr><td><code>ffprobe_bin</code></td><td>inherited</td><td>ffprobe path on the worker.</td></tr>
-    <tr><td><code>agent_addr</code></td><td>none</td><td><code>host:port</code> of <code>rrffmpeg-agent</code>. Set it to skip SSH for this host.</td></tr>
+    <tr><td><code>agent_addr</code></td><td>none</td><td><code>host:port</code> of <code>rrffmpeg-agent</code>. Set it to skip SSH for this host. Its host part must appear in the certificate.</td></tr>
     <tr><td><code>paths</code></td><td><code>[]</code></td><td>Path maps, see below.</td></tr>
   </tbody>
 </table>
@@ -203,10 +229,17 @@ separately: media and the HLS tmpfs are usually two different mounts.</p>
 <pre><code>state_dir = "/home/alice/.local/state/rrffmpeg"
 down_ttl_secs = 60
 
+# Only needed when a host sets agent_addr.
+# agent_token = "change-me"
+# agent_cert = "/home/alice/.config/rrffmpeg/worker-cert.pem"
+
 [[hosts]]
 name = "worker"
 concurrency = 2
 capabilities = ["vaapi"]
+
+# Uncomment to use the agent instead of SSH for this host.
+# agent_addr = "worker:9876"
 
 # Input: media mounted at a different root on the worker.
 [[hosts.paths]]

@@ -1,6 +1,8 @@
 # 0009: An agent transport, one TCP connection per job
 
-Status: Accepted
+Status: Accepted. The transport itself is superseded by
+[0010](0010-agent-tls.md): TLS, and one connection per direction. The frames,
+the registry and the exec rules below still stand.
 Date: 2026-11-17
 
 ## Context

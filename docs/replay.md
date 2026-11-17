@@ -119,8 +119,8 @@ touches the media.
 - Encode correctness. The stand-in ignores the arguments, so a wrong filter
   chain still passes.
 - GPU behaviour. No hardware filter runs, on any machine.
-- Worker dispatch, path mapping, SSH, requeue, the janitor. Every fixture
-  replays in local-only mode.
+- Worker dispatch, path mapping, SSH or the agent, requeue, the janitor. Every
+  fixture replays in local-only mode.
 - Signal handling during a live transcode.
 - Arguments containing a newline or a tab. `record.sh` does not escape them.
 

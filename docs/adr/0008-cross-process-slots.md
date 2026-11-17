@@ -74,7 +74,9 @@ job runs uncapped. A broken state dir must never stop a transcode.
 - A running count in the journal. The journal is append-only and has no
   compare-and-swap, and a crash leaves a count that nothing corrects.
 - A coordinator daemon handing out leases. That is dffmpeg's model and it needs
-  the agent transport, which v1 does not have.
+  the agent transport, which v1 did not have. The agent exists now (ADR 0009),
+  but it is a data path, not a placement authority, so the slots stay in
+  `state_dir`.
 - Keeping the in-process `Condvar` queue. The waiters are in different
   processes and never meet.
 - POSIX record locks (`fcntl`). They are owned by the process, not the

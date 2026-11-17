@@ -35,10 +35,10 @@ fn run() -> Result<i32> {
 
     let program = program_for(&argv0, &args);
     let config = Config::load()?;
-    let agent = agent_token(&config);
+    let agent = agent_client(&config)?;
     if agent.is_none() && config.hosts.iter().any(|h| h.agent_addr.is_some()) {
         return Err(Error::Config(
-            "a host sets agent_addr but no token is configured: set agent_token or RRFFMPEG_AGENT_TOKEN".into(),
+            "a host sets agent_addr but the agent is not configured: set agent_token and agent_cert, or RRFFMPEG_AGENT_TOKEN".into(),
         ));
     }
     let stderr_as_stdout =
@@ -140,13 +140,20 @@ fn run_local(
 }
 
 /// The environment wins over the file so a secret can stay out of a config
-/// file that other users can read.
-fn agent_token(config: &Config) -> Option<rrffmpeg::agent::Agent> {
-    std::env::var("RRFFMPEG_AGENT_TOKEN")
+/// file that other users can read. Both halves are needed: the token says who
+/// may connect, the certificate says which daemon to trust.
+fn agent_client(config: &Config) -> Result<Option<rrffmpeg::agent::Agent>> {
+    let token = std::env::var("RRFFMPEG_AGENT_TOKEN")
         .ok()
         .or_else(|| config.agent_token.clone())
-        .filter(|t| !t.is_empty())
-        .map(rrffmpeg::agent::Agent::new)
+        .filter(|t| !t.is_empty());
+    match (token, config.agent_cert.clone()) {
+        (Some(token), Some(cert)) => Ok(Some(rrffmpeg::agent::Agent::load(token, &cert)?)),
+        (None, None) => Ok(None),
+        _ => Err(Error::Config(
+            "the agent transport needs both agent_token and agent_cert".into(),
+        )),
+    }
 }
 
 /// The encoder in the arguments tells us which worker can run the job.

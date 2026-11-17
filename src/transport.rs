@@ -229,7 +229,11 @@ mod tests {
     use std::path::Path;
 
     fn fixture(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join("rrffmpeg-transport").join(name);
+        // The process id keeps two concurrent test binaries, for example two
+        // checkouts being tested at once, out of each other's directory.
+        let dir = std::env::temp_dir()
+            .join(format!("rrffmpeg-transport-{}", std::process::id()))
+            .join(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         dir

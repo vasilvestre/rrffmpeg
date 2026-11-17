@@ -1,27 +1,36 @@
 //! Agent transport: a small daemon on the worker replaces one ssh per job.
 //!
-//! A job is one TCP connection carrying length-prefixed frames: the client
-//! sends stdin bytes, the daemon answers with stdout, stderr and the exit
-//! code. A second kind of connection asks the daemon for status, which is how
-//! the janitor tests a host and checks a job without a per-job probe.
+//! A job uses two TLS connections:
+//!
+//! - the control connection carries the hello, a `ready` frame, then stdout,
+//!   stderr and the exit code from the daemon;
+//! - the stdin connection carries the bytes Jellyfin writes to stdin.
+//!
+//! One connection per direction is what keeps each stream owned by a single
+//! thread. TLS needs one object for both directions, so a shared stream means
+//! a lock, and a lock held by a blocked reader starves the writer. Two
+//! connections cost one handshake and remove the problem.
 //!
 //! The daemon runs the program as its own user with the arguments it is given.
 //! It is a remote code execution endpoint by design, so `serve` refuses to
-//! start without a token. That token travels in clear text: bind the listener
-//! to a private interface (WireGuard, Tailscale) and keep it off the LAN.
-//! shortcut: no TLS, add rustls when the agent must cross an untrusted link.
+//! start without a token and without a certificate. The client trusts exactly
+//! one certificate, the daemon's own: no CA, no web PKI.
 
 use crate::config::Host;
 use crate::transport::Transport;
 use crate::{Error, Job, Program, Result};
+use rustls::pki_types::{CertificateDer, ServerName};
+use rustls::{ClientConfig, ClientConnection, ServerConfig, ServerConnection, StreamOwned};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::os::unix::process::ExitStatusExt;
-use std::process::{Command, Stdio};
+use std::path::Path;
+use std::process::{ChildStdin, Command, Stdio};
+use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Frame kinds. The first byte of every frame is one of these.
 const HELLO: u8 = 0;
@@ -31,15 +40,24 @@ const STDERR: u8 = 3;
 const EXIT: u8 = 4;
 const STDIN_EOF: u8 = 5;
 const STATUS: u8 = 6;
+const READY: u8 = 7;
 
 /// A larger frame is a protocol error, not a big read.
 const MAX_FRAME: usize = 1 << 20;
+
+/// Connect and handshake budget. A silent peer must not park a thread.
+const HANDSHAKE: Duration = Duration::from_secs(5);
+
+/// Frames buffered between a child pipe and the socket. A full queue blocks
+/// the pump, the pipe fills, and ffmpeg waits: that is the backpressure.
+const QUEUE: usize = 64;
 
 /// What the client says first on every connection.
 #[derive(Debug, Serialize, Deserialize)]
 struct Hello {
     token: String,
-    /// `exec` runs a job, `status` answers a probe and a liveness check.
+    /// `exec` runs a job on the control connection, `stdin` carries its input,
+    /// `status` answers a probe and a liveness check.
     op: String,
     #[serde(default)]
     job: String,
@@ -60,6 +78,15 @@ struct Status {
     alive: bool,
 }
 
+/// One running job on the daemon: its pid, and its stdin until the stdin
+/// connection claims it.
+struct Slot {
+    pid: u32,
+    stdin: Option<ChildStdin>,
+}
+
+type Live = Arc<Mutex<HashMap<String, Slot>>>;
+
 fn io_err(e: io::Error, what: &str) -> Error {
     Error::Io(e, what.to_string())
 }
@@ -68,21 +95,6 @@ fn io_err(e: io::Error, what: &str) -> Error {
 /// still holds usable data. Never unwrap on a path a request can reach.
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn read_frame(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
-    let mut head = [0u8; 5];
-    r.read_exact(&mut head)?;
-    let len = u32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize;
-    if len > MAX_FRAME {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "frame too large",
-        ));
-    }
-    let mut body = vec![0u8; len];
-    r.read_exact(&mut body)?;
-    Ok((head[0], body))
 }
 
 fn write_frame(w: &mut impl Write, kind: u8, body: &[u8]) -> io::Result<()> {
@@ -94,6 +106,142 @@ fn write_frame(w: &mut impl Write, kind: u8, body: &[u8]) -> io::Result<()> {
     w.write_all(&head)?;
     w.write_all(body)?;
     w.flush()
+}
+
+/// Bytes to frames. A read can stop in the middle of a header or a body, so
+/// the pieces are kept here instead of in a `read_exact` stack frame.
+#[derive(Default)]
+struct Framer {
+    buf: Vec<u8>,
+}
+
+impl Framer {
+    fn push(&mut self, data: &[u8]) {
+        self.buf.extend_from_slice(data);
+    }
+
+    fn next(&mut self) -> io::Result<Option<(u8, Vec<u8>)>> {
+        if self.buf.len() < 5 {
+            return Ok(None);
+        }
+        let kind = self.buf[0];
+        let len = u32::from_be_bytes([self.buf[1], self.buf[2], self.buf[3], self.buf[4]]) as usize;
+        if len > MAX_FRAME {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "frame too large",
+            ));
+        }
+        if self.buf.len() < 5 + len {
+            return Ok(None);
+        }
+        let body = self.buf[5..5 + len].to_vec();
+        self.buf.drain(..5 + len);
+        Ok(Some((kind, body)))
+    }
+}
+
+/// Read one frame, waiting no longer than `deadline` if one is given.
+fn recv(
+    stream: &mut Stream,
+    framer: &mut Framer,
+    deadline: Option<Instant>,
+) -> io::Result<(u8, Vec<u8>)> {
+    loop {
+        if let Some(frame) = framer.next()? {
+            return Ok(frame);
+        }
+        if let Some(end) = deadline {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "no answer from the peer",
+                ));
+            }
+            stream.set_read_timeout(Some(left))?;
+        }
+        let mut chunk = [0u8; 32 * 1024];
+        match stream.read(&mut chunk) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "peer closed the connection",
+                ));
+            }
+            Ok(n) => framer.push(&chunk[..n]),
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// A TLS stream, client or server side. One type so the framing code above
+/// does not care which end it is on.
+enum Stream {
+    Client(StreamOwned<ClientConnection, TcpStream>),
+    Server(StreamOwned<ServerConnection, TcpStream>),
+}
+
+impl Stream {
+    fn sock(&self) -> &TcpStream {
+        match self {
+            Stream::Client(s) => &s.sock,
+            Stream::Server(s) => &s.sock,
+        }
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.sock().set_read_timeout(timeout)
+    }
+
+    /// Say goodbye instead of walking away. A bare close makes the peer see a
+    /// reset if it was still writing session tickets, and that lands in its
+    /// log as an error. Never reads, so it cannot hang on a mute peer.
+    fn close(mut self) {
+        match &mut self {
+            Stream::Client(s) => {
+                s.conn.send_close_notify();
+                while s.conn.wants_write() {
+                    if s.conn.write_tls(&mut s.sock).is_err() {
+                        return;
+                    }
+                }
+            }
+            Stream::Server(s) => {
+                s.conn.send_close_notify();
+                while s.conn.wants_write() {
+                    if s.conn.write_tls(&mut s.sock).is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Read for Stream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Stream::Client(s) => s.read(buf),
+            Stream::Server(s) => s.read(buf),
+        }
+    }
+}
+
+impl Write for Stream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Stream::Client(s) => s.write(buf),
+            Stream::Server(s) => s.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Stream::Client(s) => s.flush(),
+            Stream::Server(s) => s.flush(),
+        }
+    }
 }
 
 /// Compare without leaking where the first difference is.
@@ -108,21 +256,129 @@ fn token_eq(given: &str, expected: &str) -> bool {
     diff == 0
 }
 
+fn provider() -> Arc<rustls::crypto::CryptoProvider> {
+    Arc::new(rustls::crypto::ring::default_provider())
+}
+
+fn read_file(path: &Path) -> Result<Vec<u8>> {
+    std::fs::read(path).map_err(|e| Error::Io(e, format!("reading {}", path.display())))
+}
+
+fn pem_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
+    let text = read_file(path)?;
+    let certs = rustls_pemfile::certs(&mut io::Cursor::new(text))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| Error::Config(format!("{}: {e}", path.display())))?;
+    if certs.is_empty() {
+        return Err(Error::Config(format!(
+            "{} holds no certificate",
+            path.display()
+        )));
+    }
+    Ok(certs)
+}
+
+/// Trust exactly the certificate in the file. A self-signed certificate names
+/// the addresses in its subject alternative names, so the usual checks still
+/// run: expiry, and the name the client asked for.
+fn client_config(cert: &Path) -> Result<Arc<ClientConfig>> {
+    let mut roots = rustls::RootCertStore::empty();
+    for der in pem_certs(cert)? {
+        roots
+            .add(der)
+            .map_err(|e| Error::Config(format!("{}: {e}", cert.display())))?;
+    }
+    let config = ClientConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| Error::Config(format!("tls: {e}")))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(Arc::new(config))
+}
+
+/// Build the daemon side from the two PEM files. Public so `serve` and the
+/// latency test agree on one code path.
+pub fn server_config(cert: &Path, key: &Path) -> Result<Arc<ServerConfig>> {
+    let certs = pem_certs(cert)?;
+    let text = read_file(key)?;
+    let key = rustls_pemfile::private_key(&mut io::Cursor::new(text))
+        .map_err(|e| Error::Config(format!("{}: {e}", key.display())))?
+        .ok_or_else(|| Error::Config(format!("{} holds no private key", key.display())))?;
+    let config = ServerConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| Error::Config(format!("tls: {e}")))?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| Error::Config(format!("tls: {e}")))?;
+    Ok(Arc::new(config))
+}
+
+/// The name to verify in the certificate: the host part of `agent_addr`, so
+/// the certificate must list that address or name in its SANs.
+fn server_name(addr: &str) -> Result<ServerName<'static>> {
+    let host = match addr.rsplit_once(':') {
+        Some((h, _)) => h.trim_start_matches('[').trim_end_matches(']'),
+        None => addr,
+    };
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(ServerName::IpAddress(ip.into()));
+    }
+    ServerName::try_from(host.to_owned())
+        .map_err(|e| Error::Config(format!("agent address {host}: {e}")))
+}
+
+/// Write a certificate and its key into `dir`, for the worker and for tests.
+/// The names are `cert.pem` and `key.pem`.
+pub fn generate_cert(dir: &Path, sans: &[String]) -> Result<()> {
+    if sans.is_empty() {
+        return Err(Error::Config(
+            "a certificate needs at least one name, pass --san".into(),
+        ));
+    }
+    let key = rcgen::KeyPair::generate().map_err(|e| Error::Config(format!("cert: {e}")))?;
+    let mut params = rcgen::CertificateParams::new(sans.to_vec())
+        .map_err(|e| Error::Config(format!("cert: {e}")))?;
+    // A lab box outlives a 90 day certificate, and nothing here rotates it.
+    params.not_after = rcgen::date_time_ymd(2126, 1, 1);
+    let cert = params
+        .self_signed(&key)
+        .map_err(|e| Error::Config(format!("cert: {e}")))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| Error::Io(e, format!("creating {}", dir.display())))?;
+    let cert_path = dir.join("cert.pem");
+    let key_path = dir.join("key.pem");
+    std::fs::write(&cert_path, cert.pem())
+        .map_err(|e| Error::Io(e, format!("writing {}", cert_path.display())))?;
+    std::fs::write(&key_path, key.serialize_pem())
+        .map_err(|e| Error::Io(e, format!("writing {}", key_path.display())))?;
+    // The key is a secret: one file, one user.
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| Error::Io(e, format!("chmod {}", key_path.display())))?;
+    Ok(())
+}
+
 /// The client side of the protocol.
 pub struct Agent {
     token: String,
     timeout: Duration,
+    config: Arc<ClientConfig>,
 }
 
 impl Agent {
-    pub fn new(token: String) -> Agent {
-        Agent {
+    /// `cert` is the PEM of the daemon certificate, the only trust anchor.
+    pub fn load(token: String, cert: &Path) -> Result<Agent> {
+        Ok(Agent {
             token,
-            timeout: Duration::from_secs(5),
-        }
+            timeout: HANDSHAKE,
+            config: client_config(cert)?,
+        })
     }
 
-    fn connect(&self, host: &Host) -> Result<TcpStream> {
+    /// Connect and shake hands. The socket has no read timeout after this,
+    /// except where the caller sets one: a transcode can stay silent for
+    /// minutes while ffmpeg works.
+    fn open(&self, host: &Host, timeout: Option<Duration>) -> Result<Stream> {
         let name = host
             .agent_addr
             .as_deref()
@@ -132,22 +388,78 @@ impl Agent {
             .map_err(|e| Error::Transport(format!("agent {name}: {e}")))?
             .next()
             .ok_or_else(|| Error::Transport(format!("agent {name} resolved to no address")))?;
-        let stream = TcpStream::connect_timeout(&addr, self.timeout)
+        let sock = TcpStream::connect_timeout(&addr, self.timeout)
             .map_err(|e| Error::Transport(format!("agent {} at {name}: {e}", host.name)))?;
-        let _ = stream.set_nodelay(true);
+        let _ = sock.set_nodelay(true);
+        sock.set_read_timeout(Some(self.timeout))
+            .map_err(|e| io_err(e, "setting the handshake timeout"))?;
+        let conn = ClientConnection::new(self.config.clone(), server_name(name)?)
+            .map_err(|e| Error::Transport(format!("agent {}: {e}", host.name)))?;
+        let mut stream = Stream::Client(StreamOwned::new(conn, sock));
+        while let Stream::Client(s) = &mut stream {
+            if !s.conn.is_handshaking() {
+                break;
+            }
+            s.conn
+                .complete_io(&mut s.sock)
+                .map_err(|e| Error::Transport(format!("agent {} handshake: {e}", host.name)))?;
+        }
+        stream
+            .set_read_timeout(timeout)
+            .map_err(|e| io_err(e, "setting the read timeout"))?;
         Ok(stream)
     }
 
     /// Send the hello and return the open connection, ready for frames.
-    fn hello(&self, host: &Host, hello: &Hello) -> Result<TcpStream> {
-        let mut stream = self.connect(host)?;
-        // No read timeout after this point: a transcode can stay silent for
-        // minutes while ffmpeg works, and the socket is the job's lifeline.
-        stream.set_read_timeout(None).ok();
+    fn hello(&self, host: &Host, hello: &Hello, timeout: Option<Duration>) -> Result<Stream> {
+        let mut stream = self.open(host, timeout)?;
         let body =
             serde_json::to_vec(hello).map_err(|e| Error::Transport(format!("hello: {e}")))?;
-        write_frame(&mut stream, HELLO, &body).map_err(|e| io_err(e, "sending hello"))?;
+        write_frame(&mut stream, HELLO, &body)
+            .map_err(|e| Error::Transport(format!("agent {}: {e}", host.name)))?;
         Ok(stream)
+    }
+
+    /// The stdin connection: one thread writes it, nobody reads it here.
+    fn stdin_thread(&self, host: Host, job_id: String, stdin: Option<Box<dyn Read + Send>>) {
+        let hello = Hello {
+            token: self.token.clone(),
+            op: "stdin".into(),
+            job: job_id.clone(),
+            program: String::new(),
+            args: Vec::new(),
+            paths: Vec::new(),
+        };
+        let mut stream = match self.hello(&host, &hello, None) {
+            Ok(s) => s,
+            Err(e) => {
+                // shortcut: without this connection the job runs with no
+                // stdin, so Jellyfin's `q` is lost. It costs a transcode, not
+                // an answer, so log it and let the job finish.
+                eprintln!("rrffmpeg: agent {} stdin: {e}", host.name);
+                return;
+            }
+        };
+        if let Some(mut src) = stdin {
+            let mut buf = vec![0u8; 32 * 1024];
+            loop {
+                match src.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if write_frame(&mut stream, STDIN, &buf[..n]).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        if write_frame(&mut stream, STDIN_EOF, &[]).is_err() {
+            return;
+        }
+        // Hold the connection open until the daemon closes it. Closing early
+        // would read as "the client died" and get the job killed.
+        let mut buf = [0u8; 256];
+        while matches!(stream.read(&mut buf), Ok(n) if n > 0) {}
     }
 
     /// Run one job with output going to the two sinks. `run` passes this
@@ -175,41 +487,50 @@ impl Agent {
             args.push(arg.to_string());
         }
 
-        let mut reader = self.hello(
-            host,
-            &Hello {
-                token: self.token.clone(),
-                op: "exec".into(),
-                job: job.id.clone(),
-                program: program.to_string(),
-                args,
-                paths: Vec::new(),
-            },
-        )?;
-
-        let mut writer = reader
-            .try_clone()
-            .map_err(|e| io_err(e, "cloning the socket"))?;
-        // The pump owns a clone, so dropping it never half-closes the job.
-        std::thread::spawn(move || {
-            if let Some(mut src) = stdin {
-                let mut buf = vec![0u8; 32 * 1024];
-                loop {
-                    match src.read(&mut buf) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            if write_frame(&mut writer, STDIN, &buf[..n]).is_err() {
-                                return;
-                            }
-                        }
-                    }
-                }
+        let hello = Hello {
+            token: self.token.clone(),
+            op: "exec".into(),
+            job: job.id.clone(),
+            program: program.to_string(),
+            args,
+            paths: Vec::new(),
+        };
+        let mut ctl = self.hello(host, &hello, Some(self.timeout))?;
+        let mut framer = Framer::default();
+        match recv(&mut ctl, &mut framer, Some(Instant::now() + self.timeout)) {
+            Ok((READY, _)) => {}
+            Ok((EXIT, body)) if body.len() == 4 => {
+                // The daemon refused the job but still reported a code.
+                return Ok(i32::from_be_bytes([body[0], body[1], body[2], body[3]]));
             }
-            let _ = write_frame(&mut writer, STDIN_EOF, &[]);
-        });
+            Ok((kind, _)) => {
+                return Err(Error::Transport(format!(
+                    "agent {} answered frame {kind}, expected ready",
+                    host.name
+                )));
+            }
+            Err(e) => {
+                return Err(Error::Transport(format!(
+                    "agent {} did not start job {}: {e}",
+                    host.name, job.id
+                )));
+            }
+        }
+        ctl.set_read_timeout(None)
+            .map_err(|e| io_err(e, "clearing the read timeout"))?;
+
+        // The daemon has the job now, so the child is waiting on stdin.
+        let stdin_host = host.clone();
+        let id = job.id.clone();
+        let me = Agent {
+            token: self.token.clone(),
+            timeout: self.timeout,
+            config: self.config.clone(),
+        };
+        std::thread::spawn(move || me.stdin_thread(stdin_host, id, stdin));
 
         loop {
-            match read_frame(&mut reader) {
+            match recv(&mut ctl, &mut framer, None) {
                 Ok((STDOUT, body)) => {
                     out.write_all(&body)
                         .map_err(|e| io_err(e, "writing stdout"))?;
@@ -226,8 +547,8 @@ impl Agent {
                     let _ = sink.flush();
                 }
                 Ok((EXIT, body)) if body.len() == 4 => {
-                    let code = i32::from_be_bytes([body[0], body[1], body[2], body[3]]);
-                    return Ok(code);
+                    ctl.close();
+                    return Ok(i32::from_be_bytes([body[0], body[1], body[2], body[3]]));
                 }
                 // Unknown frames are ignored so a newer daemon can add one.
                 Ok(_) => {}
@@ -254,21 +575,25 @@ impl Agent {
                 args: Vec::new(),
                 paths: paths.to_vec(),
             },
+            Some(self.timeout),
         )?;
-        let timeout = self.timeout;
-        stream
-            .set_read_timeout(Some(timeout))
-            .map_err(|e| io_err(e, "setting the read timeout"))?;
-        let (kind, body) = read_frame(&mut stream)
-            .map_err(|e| Error::Transport(format!("agent {}: {e}", host.name)))?;
+        let mut framer = Framer::default();
+        let (kind, body) = recv(
+            &mut stream,
+            &mut framer,
+            Some(Instant::now() + self.timeout),
+        )
+        .map_err(|e| Error::Transport(format!("agent {}: {e}", host.name)))?;
         if kind != STATUS {
             return Err(Error::Transport(format!(
                 "agent {} answered frame {kind}, expected status",
                 host.name
             )));
         }
-        serde_json::from_slice(&body)
-            .map_err(|e| Error::Transport(format!("agent {} status: {e}", host.name)))
+        let status: Status = serde_json::from_slice(&body)
+            .map_err(|e| Error::Transport(format!("agent {} status: {e}", host.name)))?;
+        stream.close();
+        Ok(status)
     }
 }
 
@@ -296,26 +621,29 @@ impl Transport for Agent {
     }
 }
 
-/// Bind and serve until the process is killed. Refuses an empty token: the
-/// daemon runs arbitrary argv, so an open port is an open shell.
-pub fn serve(addr: &str, token: String) -> Result<()> {
+/// Bind and serve until the process is killed. Refuses an empty token or a
+/// missing certificate: the daemon runs arbitrary argv, so an open port
+/// without TLS is an open shell.
+pub fn serve(addr: &str, token: String, cert: &Path, key: &Path) -> Result<()> {
     if token.is_empty() {
         return Err(Error::Config(
             "the agent needs a token, pass --token or RRFFMPEG_AGENT_TOKEN".into(),
         ));
     }
+    let tls = server_config(cert, key)?;
     let listener = TcpListener::bind(addr).map_err(|e| io_err(e, "binding the agent listener"))?;
     let local = listener
         .local_addr()
         .map(|a| a.to_string())
         .unwrap_or_else(|_| addr.to_string());
-    eprintln!("rrffmpeg-agent: listening on {local}");
-    serve_on(listener, token)
+    eprintln!("rrffmpeg-agent: listening on {local} with tls");
+    serve_on(listener, token, tls)
 }
 
-/// Same as `serve` with a caller-bound listener, so tests can use port 0.
-pub fn serve_on(listener: TcpListener, token: String) -> Result<()> {
-    let live: Arc<Mutex<HashMap<String, u32>>> = Arc::new(Mutex::new(HashMap::new()));
+/// Same as `serve` with a caller-bound listener and a prepared config, so
+/// tests can use port 0 and a throwaway certificate.
+pub fn serve_on(listener: TcpListener, token: String, tls: Arc<ServerConfig>) -> Result<()> {
+    let live: Live = Arc::new(Mutex::new(HashMap::new()));
     for conn in listener.incoming() {
         let stream = match conn {
             Ok(s) => s,
@@ -326,25 +654,41 @@ pub fn serve_on(listener: TcpListener, token: String) -> Result<()> {
         };
         let token = token.clone();
         let live = live.clone();
+        let tls = tls.clone();
         std::thread::spawn(move || {
-            if let Err(e) = handle(stream, &token, &live) {
-                eprintln!("rrffmpeg-agent: {e}");
+            if let Err(e) = handle(stream, &token, &live, tls) {
+                // A client that leaves without close_notify is normal: it
+                // exits when the job ends.
+                if !ends_quietly(&e) {
+                    eprintln!("rrffmpeg-agent: {e}");
+                }
             }
         });
     }
     Ok(())
 }
 
-fn handle(stream: TcpStream, token: &str, live: &Arc<Mutex<HashMap<String, u32>>>) -> Result<()> {
-    let mut reader = stream
-        .try_clone()
-        .map_err(|e| io_err(e, "cloning the socket"))?;
-    // A client that connects and says nothing must not park a thread forever.
-    reader
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| io_err(e, "setting the handshake timeout"))?;
-    let (kind, body) =
-        read_frame(&mut reader).map_err(|e| Error::Transport(format!("handshake: {e}")))?;
+/// True for the errors a client that simply stops talking produces.
+fn ends_quietly(e: &Error) -> bool {
+    match e {
+        Error::Transport(m) => {
+            m.contains("peer closed the connection")
+                || m.contains("close_notify")
+                || m.contains("unexpected end of file")
+        }
+        _ => false,
+    }
+}
+
+fn handle(stream: TcpStream, token: &str, live: &Live, tls: Arc<ServerConfig>) -> Result<()> {
+    let peer = stream
+        .peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| "unknown".into());
+    let mut stream = accept(stream, tls, &peer)?;
+    let mut framer = Framer::default();
+    let (kind, body) = recv(&mut stream, &mut framer, Some(Instant::now() + HANDSHAKE))
+        .map_err(|e| Error::Transport(format!("handshake from {peer}: {e}")))?;
     if kind != HELLO {
         return Err(Error::Transport(format!(
             "first frame is {kind}, expected hello"
@@ -353,41 +697,50 @@ fn handle(stream: TcpStream, token: &str, live: &Arc<Mutex<HashMap<String, u32>>
     let hello: Hello =
         serde_json::from_slice(&body).map_err(|e| Error::Transport(format!("hello: {e}")))?;
     if !token_eq(&hello.token, token) {
-        return Err(Error::Transport(format!(
-            "bad token from {}",
-            reader
-                .peer_addr()
-                .map(|a| a.to_string())
-                .unwrap_or_else(|_| "unknown".into())
-        )));
+        return Err(Error::Transport(format!("bad token from {peer}")));
     }
-    reader
+    stream
         .set_read_timeout(None)
         .map_err(|e| io_err(e, "clearing the handshake timeout"))?;
 
     match hello.op.as_str() {
-        "status" => status_reply(stream, &hello, live),
+        "status" => status_reply(&mut stream, &hello, live),
         "exec" => exec_reply(stream, &hello, live),
+        "stdin" => stdin_reply(stream, framer, &hello, live),
         other => Err(Error::Transport(format!("unknown op {other}"))),
     }
 }
 
-fn status_reply(
-    mut stream: TcpStream,
-    hello: &Hello,
-    live: &Arc<Mutex<HashMap<String, u32>>>,
-) -> Result<()> {
+/// Complete the handshake, then let the caller decide about timeouts.
+fn accept(sock: TcpStream, tls: Arc<ServerConfig>, peer: &str) -> Result<Stream> {
+    sock.set_read_timeout(Some(HANDSHAKE))
+        .map_err(|e| io_err(e, "setting the handshake timeout"))?;
+    let conn = ServerConnection::new(tls)
+        .map_err(|e| Error::Transport(format!("tls from {peer}: {e}")))?;
+    let mut stream = Stream::Server(StreamOwned::new(conn, sock));
+    while let Stream::Server(s) = &mut stream {
+        if !s.conn.is_handshaking() {
+            break;
+        }
+        s.conn
+            .complete_io(&mut s.sock)
+            .map_err(|e| Error::Transport(format!("tls from {peer}: {e}")))?;
+    }
+    Ok(stream)
+}
+
+fn status_reply(stream: &mut Stream, hello: &Hello, live: &Live) -> Result<()> {
     let ok = hello.paths.iter().all(|p| std::fs::metadata(p).is_ok());
     let alive = if hello.job.is_empty() {
         false
     } else {
         lock(live)
             .get(&hello.job)
-            .is_some_and(|pid| pid_alive(*pid))
+            .is_some_and(|slot| pid_alive(slot.pid))
     };
     let body = serde_json::to_vec(&Status { ok, alive })
         .map_err(|e| Error::Transport(format!("status: {e}")))?;
-    write_frame(&mut stream, STATUS, &body).map_err(|e| io_err(e, "sending status"))
+    write_frame(stream, STATUS, &body).map_err(|e| io_err(e, "sending status"))
 }
 
 fn pid_alive(pid: u32) -> bool {
@@ -395,11 +748,7 @@ fn pid_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
-fn exec_reply(
-    stream: TcpStream,
-    hello: &Hello,
-    live: &Arc<Mutex<HashMap<String, u32>>>,
-) -> Result<()> {
+fn exec_reply(mut stream: Stream, hello: &Hello, live: &Live) -> Result<()> {
     let mut child = Command::new(&hello.program)
         .args(&hello.args)
         .stdin(Stdio::piped())
@@ -418,79 +767,101 @@ fn exec_reply(
         .take()
         .ok_or_else(|| Error::Transport("agent child has no stderr".into()))?;
 
-    let writer = Arc::new(Mutex::new(
-        stream
-            .try_clone()
-            .map_err(|e| io_err(e, "cloning the socket"))?,
-    ));
-    lock(live).insert(hello.job.clone(), pid);
+    lock(live).insert(
+        hello.job.clone(),
+        Slot {
+            pid,
+            stdin: stdin_pipe,
+        },
+    );
+    // The client waits for this before it opens the stdin connection, so the
+    // job is in the registry before anyone looks for it.
+    write_frame(&mut stream, READY, &[]).map_err(|e| io_err(e, "sending ready"))?;
 
-    // The waiter owns the child, drains both pipes, then reports the code and
-    // shuts the socket down, which unblocks the stdin side below. The exit
-    // frame must come after the pipes are empty or the last stderr line races
-    // the code and the client drops it.
+    // The waiter owns the child and both pipes. Frames go through this queue
+    // so exactly one thread, the one below, writes the socket.
+    let (tx, rx) = sync_channel::<(u8, Vec<u8>)>(QUEUE);
     let job = hello.job.clone();
     let waiter_live = live.clone();
-    let waiter = writer.clone();
     std::thread::spawn(move || {
-        let stdout_pump = pump(stdout_pipe, writer.clone(), STDOUT);
-        let stderr_pump = pump(stderr_pipe, writer.clone(), STDERR);
+        let stdout_pump = pump(stdout_pipe, tx.clone(), STDOUT);
+        let stderr_pump = pump(stderr_pipe, tx.clone(), STDERR);
         let code = child
             .wait()
             .map(|s| s.code().unwrap_or_else(|| 128 + s.signal().unwrap_or(0)))
             .unwrap_or(-1);
         let _ = stdout_pump.join();
         let _ = stderr_pump.join();
-        let mut sock = lock(&waiter);
-        let _ = write_frame(&mut *sock, EXIT, &code.to_be_bytes());
-        let _ = sock.shutdown(Shutdown::Both);
-        drop(sock);
+        // The exit frame must come after the pipes are empty or the last
+        // stderr line races the code and the client drops it.
+        let _ = tx.send((EXIT, code.to_be_bytes().to_vec()));
         lock(&waiter_live).remove(&job);
     });
 
-    let mut reader = stream;
-    let mut stdin_pipe = stdin_pipe;
+    while let Ok((kind, body)) = rx.recv() {
+        if write_frame(&mut stream, kind, &body).is_err() {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// The stdin connection. Its end is the client's end: a client that goes away
+/// closes it, and the job must not outlive the person waiting for it.
+fn stdin_reply(mut stream: Stream, mut framer: Framer, hello: &Hello, live: &Live) -> Result<()> {
+    let Some(pipe) = lock(live)
+        .get_mut(&hello.job)
+        .and_then(|slot| slot.stdin.take())
+    else {
+        // A job that ends before its stdin connection arrives is normal: the
+        // client opens stdin right after `ready`, and a short job can finish
+        // in between. Nothing to feed, and nothing to kill.
+        return Ok(());
+    };
+    let mut pipe = Some(pipe);
     loop {
-        match read_frame(&mut reader) {
+        match recv(&mut stream, &mut framer, None) {
             Ok((STDIN, body)) => {
-                if let Some(pipe) = stdin_pipe.as_mut() {
+                if let Some(pipe) = pipe.as_mut() {
                     let _ = pipe.write_all(&body);
                     let _ = pipe.flush();
                 }
             }
             // Jellyfin keeps stdin open and writes `q` at stop, so an early
             // EOF is not a reason to kill the job.
-            Ok((STDIN_EOF, _)) => stdin_pipe = None,
+            Ok((STDIN_EOF, _)) => pipe = None,
             Ok(_) => {}
-            // The client is gone: its stdio fds are closed with it.
             Err(_) => break,
         }
     }
-    drop(stdin_pipe);
+    drop(pipe);
 
     // Kill the child only if the waiter has not already removed it. The
     // remaining race is a pid reused inside a microsecond window.
-    if lock(live).remove(&hello.job).is_some() {
-        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    if let Some(slot) = lock(live).remove(&hello.job) {
+        unsafe { libc::kill(slot.pid as libc::pid_t, libc::SIGTERM) };
         std::thread::sleep(Duration::from_secs(2));
-        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        if pid_alive(slot.pid) {
+            unsafe { libc::kill(slot.pid as libc::pid_t, libc::SIGKILL) };
+        }
     }
     Ok(())
 }
 
 /// Copy one child pipe into frames of one kind.
 fn pump(
-    mut pipe: impl Read + Send + 'static,
-    writer: Arc<Mutex<TcpStream>>,
+    pipe: impl Read + Send + 'static,
+    tx: SyncSender<(u8, Vec<u8>)>,
     kind: u8,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        let mut pipe = pipe;
         let mut buf = [0u8; 32 * 1024];
         loop {
             match pipe.read(&mut buf) {
                 Ok(0) | Err(_) => return,
                 Ok(n) => {
-                    if write_frame(&mut *lock(&writer), kind, &buf[..n]).is_err() {
+                    if tx.send((kind, buf[..n].to_vec())).is_err() {
                         return;
                     }
                 }
@@ -507,11 +878,28 @@ mod tests {
 
     const TOKEN: &str = "test-token";
 
+    /// One throwaway certificate for the whole test binary, generated in a
+    /// temp dir. Nothing secret is committed.
+    fn tls() -> (Arc<ServerConfig>, PathBuf) {
+        static ONCE: std::sync::OnceLock<(Arc<ServerConfig>, PathBuf)> = std::sync::OnceLock::new();
+        ONCE.get_or_init(|| {
+            let dir =
+                std::env::temp_dir().join(format!("rrffmpeg-agent-tls-{}", std::process::id()));
+            let sans = vec!["127.0.0.1".to_string(), "localhost".to_string()];
+            generate_cert(&dir, &sans).expect("cert");
+            let config =
+                server_config(&dir.join("cert.pem"), &dir.join("key.pem")).expect("server config");
+            (config, dir.join("cert.pem"))
+        })
+        .clone()
+    }
+
     fn start() -> String {
+        let (config, _) = tls();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr").to_string();
         std::thread::spawn(move || {
-            let _ = serve_on(listener, TOKEN.to_string());
+            let _ = serve_on(listener, TOKEN.to_string(), config);
         });
         addr
     }
@@ -539,7 +927,8 @@ mod tests {
     }
 
     fn agent() -> Agent {
-        Agent::new(TOKEN.into())
+        let (_, cert) = tls();
+        Agent::load(TOKEN.into(), &cert).expect("agent")
     }
 
     fn exec(a: &Agent, h: &Host, j: &Job, input: Option<&str>) -> Result<(i32, String, String)> {
@@ -556,23 +945,36 @@ mod tests {
     }
 
     #[test]
-    fn frames_round_trip() {
+    fn frames_round_trip_across_partial_reads() {
         let mut buf = Vec::new();
         write_frame(&mut buf, STDIN, b"hello").expect("write");
         write_frame(&mut buf, STDIN_EOF, b"").expect("write");
-        let mut r = buf.as_slice();
+
+        let mut framer = Framer::default();
+        // One byte at a time: the worst case a timeout can produce.
+        for (i, byte) in buf.iter().enumerate() {
+            framer.push(&[*byte]);
+            if i < 9 {
+                assert!(framer.next().expect("no error").is_none());
+            }
+        }
         assert_eq!(
-            read_frame(&mut r).expect("read"),
+            framer.next().expect("read").expect("frame"),
             (STDIN, b"hello".to_vec())
         );
-        assert_eq!(read_frame(&mut r).expect("read"), (STDIN_EOF, Vec::new()));
+        assert_eq!(
+            framer.next().expect("read").expect("frame"),
+            (STDIN_EOF, Vec::new())
+        );
     }
 
     #[test]
     fn a_frame_longer_than_the_cap_is_rejected() {
+        let mut framer = Framer::default();
         let mut buf = vec![STDOUT];
         buf.extend_from_slice(&((MAX_FRAME as u32) + 1).to_be_bytes());
-        let err = read_frame(&mut buf.as_slice()).expect_err("oversized frame");
+        framer.push(&buf);
+        let err = framer.next().expect_err("oversized frame");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
@@ -628,6 +1030,21 @@ mod tests {
     }
 
     #[test]
+    fn a_large_output_does_not_deadlock() {
+        let addr = start();
+        let h = host(&addr, "/bin/sh");
+        let (code, out, _) = exec(
+            &agent(),
+            &h,
+            &job(&["-c", "head -c 300000 /dev/zero | tr '\\0' x"]),
+            None,
+        )
+        .expect("exec");
+        assert_eq!(code, 0);
+        assert_eq!(out.len(), 300_000);
+    }
+
+    #[test]
     fn probe_checks_the_mapped_roots() {
         let addr = start();
         let mut h = host(&addr, "/bin/true");
@@ -656,9 +1073,49 @@ mod tests {
     fn a_wrong_token_is_refused() {
         let addr = start();
         let h = host(&addr, "/bin/echo");
-        let bad = Agent::new("wrong".into());
+        let (_, cert) = tls();
+        let bad = Agent::load("wrong".into(), &cert).expect("agent");
         assert!(exec(&bad, &h, &job(&["x"]), None).is_err());
         assert!(!bad.probe(&h));
+    }
+
+    #[test]
+    fn a_plain_tcp_client_cannot_talk_to_the_agent() {
+        let addr = start();
+        let mut sock = TcpStream::connect(&addr).expect("connect");
+        sock.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        // A cleartext hello is not a TLS record. The daemon must hang up
+        // without ever answering a frame.
+        write_frame(
+            &mut sock,
+            HELLO,
+            b"{\"token\":\"test-token\",\"op\":\"status\"}",
+        )
+        .ok();
+        let mut buf = [0u8; 64];
+        let mut total = 0usize;
+        loop {
+            match sock.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    total += n;
+                    assert!(total < 4096, "the daemon keeps talking plaintext");
+                }
+            }
+        }
+        assert!(total < 4096);
+    }
+
+    #[test]
+    fn a_certificate_for_another_name_is_refused() {
+        let addr = start();
+        let dir = std::env::temp_dir().join(format!("rrffmpeg-wrong-name-{}", std::process::id()));
+        generate_cert(&dir, &["other.example".to_string()]).expect("cert");
+        // Trusting another certificate must not open the connection, even
+        // though both are self-signed.
+        let wrong = Agent::load(TOKEN.into(), &dir.join("cert.pem")).expect("agent");
+        assert!(!wrong.probe(&host(&addr, "/bin/echo")));
+        assert!(!wrong.job_alive(&host(&addr, "/bin/echo"), "x"));
     }
 
     #[test]

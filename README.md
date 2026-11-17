@@ -87,8 +87,8 @@ cost.
 - **Explicit state with reconciliation.** A janitor thread re-tests unhealthy
   hosts, reaps orphan processes, and requeues jobs when a worker disappears.
   The state model is the opposite of "newest row wins".
-- **Priority as a hint.** Probes poll for a slot faster than transcodes.
-  Ordering across processes needs the agent daemon.
+- **Priority as a hint.** Probes poll for a slot faster than transcodes. The
+  poll is not a queue, so order is best effort, with or without the agent.
 - **Capability-aware placement.** Workers advertise VAAPI/NVENC/QSV and their
   concurrency limit. The scheduler matches, instead of a global weight. The
   limit is enforced by one exclusive lock file per slot, freed by the kernel
@@ -109,8 +109,8 @@ Ship the smallest thing that is strictly better than rffmpeg. State today:
   correct `stdin`/`stdout`/`stderr` handling (including rffmpeg's
   `stderr_as_stdout` special-case). Verified against real ffmpeg 8.0.1.
 - [x] One worker over SSH, with path mapping in both directions.
-- [x] Agent transport: `rrffmpeg-agent` on the worker, one TCP connection per
-  job. `agent_addr` on a host selects it, else SSH. No TLS, see ADR 0009.
+- [x] Agent transport: `rrffmpeg-agent` on the worker, two TLS connections per
+  job. `agent_addr` on a host selects it, else SSH. ADR 0009 and ADR 0010.
 - [x] Async WAL bookkeeping plus a janitor (re-test, reap). Requeue waits for
   the agent transport: a dead client has nobody left to retry.
 - [x] Per-host concurrency cap and capability matching. The cap holds across
@@ -125,26 +125,39 @@ Ship the smallest thing that is strictly better than rffmpeg. State today:
 Success criterion: the production pair (`client` → `worker`) runs on rrffmpeg
 for a week, dispatch p99 under 50 ms, and nobody has to run a repair command.
 
+Measured so far, on one loopback box with the real ffmpeg 8.0.1: dispatch p99
+32.95 ms, of which ffmpeg itself is 27.8 ms, the dispatcher adds 3.8 ms and the
+TLS transport 0.4 ms. Method and raw runs in `docs/latency.md`.
+
 ## Agent transport
 
 SSH needs nothing on the worker. The agent removes the per-job handshake and
-the per-job probe, and it answers "is this job still running" from memory.
+the per-job probe, and it answers "is this job still running" from memory. It
+speaks TLS, and the client trusts exactly one certificate: the daemon's own.
 
-On the worker:
+Generate the pair on the worker. List every name and address a client will use
+to reach it, because the certificate is checked against `agent_addr`:
 
 ```bash
 install -D rrffmpeg-agent ~/.local/bin/rrffmpeg-agent
-RRFFMPEG_AGENT_TOKEN=change-me rrffmpeg-agent --listen 0.0.0.0:9876
+rrffmpeg-agent --init ~/.config/rrffmpeg --san worker --san 10.8.0.2
 ```
 
-Keep it behind a private interface. The token travels in clear text and the
-daemon runs whatever argv the token holder sends, so bind to a VPN address and
-not to a public one.
+That writes `cert.pem` and `key.pem`, the key mode 0600. Start the daemon:
 
-On the client, set the token and the address:
+```bash
+RRFFMPEG_AGENT_TOKEN=change-me rrffmpeg-agent \
+    --listen 10.8.0.2:9876 \
+    --cert ~/.config/rrffmpeg/cert.pem \
+    --key ~/.config/rrffmpeg/key.pem
+```
+
+Copy `cert.pem` to the client. Copy it over a channel you already trust, since
+it is the only thing standing between the client and an impostor. Then:
 
 ```toml
 agent_token = "change-me"
+agent_cert = "/home/alice/.config/rrffmpeg/worker-cert.pem"
 
 [[hosts]]
 name = "worker"
@@ -153,6 +166,11 @@ agent_addr = "worker:9876"
 
 The address may differ from `name`. A host without `agent_addr` keeps using
 SSH, so one config can mix both transports.
+
+The certificate proves the daemon to the client. The token proves the client to
+the daemon; it travels inside TLS, but a stolen token still works from any host
+that can reach the address. Keep the listener on a private network until mTLS
+exists.
 
 ## Later
 

@@ -1,6 +1,7 @@
 # 0007: Per-job pid file for liveness
 
-Status: Accepted
+Status: Accepted. For hosts with `agent_addr`, ADR 0009 answers `job_alive`
+from the daemon's registry instead of the pid file.
 Date: 2026-11-17
 
 ## Context

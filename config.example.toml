@@ -10,6 +10,12 @@ stderr_as_stdout = false
 # RRFFMPEG_AGENT_TOKEN overrides it, which keeps the secret out of this file.
 # agent_token = "change-me"
 
+# Certificate of the agent daemon, the only trust anchor for the agent
+# transport. Generate it on the worker with `rrffmpeg-agent --init DIR --san
+# NAME` and copy cert.pem here. Both this key and agent_token are needed, and
+# only when a host sets agent_addr.
+# agent_cert = "/home/alice/.config/rrffmpeg/worker-cert.pem"
+
 # Journal, pid files and the `coord` slot files. Put it on tmpfs if the disk is
 # slow, the journal is append-only and survives a reboot only for the janitor's
 # benefit.
