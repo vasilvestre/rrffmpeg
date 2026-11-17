@@ -287,6 +287,9 @@ sudo ln -sf /usr/local/bin/rrffmpeg /usr/local/bin/ffprobe
 
 The two symlinks matter: Jellyfin finds `ffprobe` next to `ffmpeg`.
 
+The full procedure, including the agent daemon, the disk checks and a section
+written for an AI agent that installs this, is in [`INSTALL.md`](INSTALL.md).
+
 ## Measure it in production
 
 Every invocation appends to the journal, so the numbers are already on disk.

@@ -8,6 +8,7 @@ Each entry points at raw Markdown so a reader gets plain text.
 ## Docs
 
 - [README](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/README.md): what the project is, why it exists, the measured defects it fixes, install and configuration.
+- [INSTALL](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/INSTALL.md): the full install on a client and a worker, the agent daemon, the disk and GPU checks, and the section written for an AI agent.
 - [Project page](https://vasilvestre.github.io/rrfmpeg/): the same pitch as HTML, plus the current status section.
 - [Measured dispatch latency](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/latency.md): how much the dispatcher adds to a transcode start, with the commands to repeat the measurement.
 - [Replay harness](https://raw.githubusercontent.com/vasilvestre/rrfmpeg/main/docs/replay.md): records real Jellyfin invocations and replays them through `rrffmpeg` to catch argument, quoting, stream wiring and exit code regressions.
