@@ -379,3 +379,7 @@ cd ~/projects/oss/rrffmpeg
 cargo test
 cargo build --release
 ```
+
+## License
+
+MIT, see [`LICENSE`](LICENSE).
