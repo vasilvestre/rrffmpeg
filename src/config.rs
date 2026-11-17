@@ -35,6 +35,22 @@ fn default_ssh() -> PathBuf {
     PathBuf::from("ssh")
 }
 
+/// Clients sharing a state_dir are told apart by this name, so the hostname is
+/// the least surprising default. Two hosts named alike count as one client.
+fn default_client_name() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|name| name.trim().to_string())
+        .ok()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "client".to_string())
+}
+
+/// Same scale as the kernel's BFQ IO weight, so one client's number means the
+/// same thing here and in `blkio.bfq.weight`.
+fn default_client_weight() -> u32 {
+    100
+}
+
 fn default_ffmpeg() -> PathBuf {
     PathBuf::from("ffmpeg")
 }
@@ -119,6 +135,14 @@ pub struct Config {
     /// Expiry is the whole repair mechanism: no daemon clears the flag.
     #[serde(default = "default_down_ttl")]
     pub down_ttl_secs: u64,
+    /// Name this client uses in the shared queue. Clients that point at the
+    /// same `state_dir` must differ, or they count as one client.
+    #[serde(default = "default_client_name")]
+    pub client_name: String,
+    /// Share of a busy worker, 1 to 1000. Read only while jobs wait: a client
+    /// alone keeps taking every slot whatever its weight.
+    #[serde(default = "default_client_weight")]
+    pub client_weight: u32,
 }
 
 impl Default for Config {
@@ -134,6 +158,8 @@ impl Default for Config {
             local_ffprobe: default_ffprobe(),
             queue_wait_secs: default_queue_wait(),
             down_ttl_secs: default_down_ttl(),
+            client_name: default_client_name(),
+            client_weight: default_client_weight(),
         }
     }
 }

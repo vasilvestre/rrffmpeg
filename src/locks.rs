@@ -40,6 +40,12 @@ impl LockDir {
         }
     }
 
+    /// The directory every coordination file shares. Clients must point at the
+    /// same one for slots and weights to mean anything across machines.
+    pub fn coord(&self) -> &std::path::Path {
+        &self.root
+    }
+
     /// Hold a free slot on `host`, or return `None` when another process holds
     /// them all. Slots are tried in index order; an unopenable slot file
     /// returns an uncapped guard instead of failing the job.
@@ -170,7 +176,7 @@ impl LockDir {
 
 /// FNV-1a 64 of the host name. The name is an ssh destination and can contain
 /// `@` or `:`, so it never becomes a path component itself.
-fn hostkey(name: &str) -> String {
+pub(crate) fn hostkey(name: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in name.as_bytes() {
         hash ^= u64::from(*byte);

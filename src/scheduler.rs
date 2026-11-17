@@ -6,6 +6,8 @@
 use crate::Host;
 use crate::Job;
 use crate::locks::{LockDir, SlotGuard};
+use crate::queue::{Lane, Queue};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -30,17 +32,36 @@ pub struct Lease {
 pub struct Scheduler {
     hosts: Vec<Host>,
     locks: Arc<LockDir>,
+    /// The shared order, under the same `coord/` as the slots.
+    queue: Queue,
+    /// Name this process reports to the queue. Two clients that share a
+    /// `state_dir` must not share a name.
+    client: String,
+    /// Share of a busy worker, 1 to 1000. Only read while jobs wait.
+    weight: u32,
     /// How long this process's down verdict is trusted by the others.
     down_ttl: Duration,
 }
 
 impl Scheduler {
     pub fn new(hosts: Vec<Host>, locks: Arc<LockDir>, down_ttl: Duration) -> Scheduler {
+        let queue = Queue::new(locks.coord());
         Scheduler {
             hosts,
             locks,
+            queue,
+            client: "client".to_string(),
+            weight: 100,
             down_ttl,
         }
+    }
+
+    /// Name and share of this client. The weight is clamped to the range the
+    /// kernel's own IO weights use, so one config cannot drown another.
+    pub fn with_client(mut self, client: impl Into<String>, weight: u32) -> Scheduler {
+        self.client = client.into();
+        self.weight = weight.clamp(1, 1000);
+        self
     }
 
     /// Reserve a slot on the eligible host with the lowest running/concurrency
@@ -60,22 +81,61 @@ impl Scheduler {
         None
     }
 
-    /// Poll for a slot until the deadline. Priority only sets the poll rate,
-    /// because ordering across processes would need a daemon.
+    /// Poll for a slot until the deadline. The first attempt is unqueued, so a
+    /// job that finds a free slot never touches the queue directory. After
+    /// that the job publishes one ticket per eligible host and declines any
+    /// slot a better ticket is waiting for: class first, then the client's
+    /// share of recent starts.
     pub fn acquire_blocking(&self, job: &Job, timeout: Duration) -> Option<Lease> {
         let deadline = Instant::now() + timeout;
+        if let Some(lease) = self.acquire(job) {
+            return Some(lease);
+        }
+        let mut lanes = self.lanes(job);
         let mut wait = base_interval(job.priority);
         loop {
-            if let Some(lease) = self.acquire(job) {
-                return Some(lease);
+            let mut ready = false;
+            if let Some(index) = self.pick_host(job.capability.as_deref()) {
+                let host = &self.hosts[index];
+                if let Some(lane) = lanes.get_mut(&host.name) {
+                    self.queue.refresh(lane);
+                    ready = self.queue.ahead(lane);
+                    if ready && let Some(guard) = self.locks.try_acquire(host, &job.id) {
+                        // Only a job that had to wait is charged, so the
+                        // shares measure contention and not idle history.
+                        self.queue.charge(&host.name, &self.client);
+                        return Some(Lease {
+                            host: host.clone(),
+                            _guard: guard,
+                        });
+                    }
+                }
             }
             let now = Instant::now();
             if now >= deadline {
                 return None;
             }
-            thread::sleep(wait.min(deadline - now));
+            // A job that is next in line must not sleep through a freed slot.
+            let pause = if ready { FAST_POLL } else { wait };
+            thread::sleep(pause.min(deadline - now));
             wait = next_interval(job.priority, wait);
         }
+    }
+
+    /// One ticket per host this job could use. A ticket for a full host still
+    /// matters: it is how the other waiters see this job coming.
+    fn lanes(&self, job: &Job) -> HashMap<String, Lane> {
+        let mut lanes = HashMap::new();
+        for host in &self.hosts {
+            if self.is_down(&host.name) || !self.capability_ok(host, job.capability.as_deref()) {
+                continue;
+            }
+            let lane = self
+                .queue
+                .join(&host.name, job.priority, &self.client, self.weight);
+            lanes.insert(host.name.clone(), lane);
+        }
+        lanes
     }
 
     pub fn mark_down(&self, host: &str) {
@@ -313,6 +373,91 @@ mod tests {
         thread::sleep(Duration::from_millis(50));
         drop(held);
         assert!(waiter.join().expect("waiter thread").is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_probe_takes_the_slot_a_transcode_is_waiting_for() {
+        let (dir, locks) = scratch("probe-first");
+        let scheduler = Arc::new(Scheduler::new(
+            vec![host("w", 1, &[])],
+            locks,
+            Duration::from_secs(60),
+        ));
+        let held = scheduler.acquire(&job(0, None)).expect("the only slot");
+
+        let transcode = {
+            let scheduler = Arc::clone(&scheduler);
+            thread::spawn(move || scheduler.acquire_blocking(&job(0, None), Duration::from_secs(5)))
+        };
+        thread::sleep(Duration::from_millis(200));
+        let probe = {
+            let scheduler = Arc::clone(&scheduler);
+            thread::spawn(move || {
+                scheduler.acquire_blocking(&job(-5, None), Duration::from_secs(5))
+            })
+        };
+        thread::sleep(Duration::from_millis(200));
+        drop(held);
+
+        // The probe joined last and still goes first: class decides, not the
+        // poll rate.
+        let probe_lease = probe.join().expect("probe thread").expect("the probe wins");
+        assert_eq!(probe_lease.host.name, "w");
+        drop(probe_lease);
+        let transcode_lease = transcode
+            .join()
+            .expect("transcode thread")
+            .expect("the transcode gets the slot next");
+        drop(transcode_lease);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_job_that_had_to_wait_is_charged_to_its_client() {
+        let (dir, locks) = scratch("charge");
+        let scheduler = Arc::new(
+            Scheduler::new(
+                vec![host("w", 1, &[])],
+                Arc::clone(&locks),
+                Duration::from_secs(60),
+            )
+            .with_client("alice", 300),
+        );
+        let held = scheduler.acquire(&job(0, None)).expect("the only slot");
+        let waiter = {
+            let scheduler = Arc::clone(&scheduler);
+            thread::spawn(move || scheduler.acquire_blocking(&job(0, None), Duration::from_secs(2)))
+        };
+        thread::sleep(Duration::from_millis(150));
+        drop(held);
+        drop(waiter.join().expect("waiter thread").expect("a lease"));
+
+        let served = locks
+            .coord()
+            .join(crate::locks::hostkey("w"))
+            .join("queue/served");
+        let text = std::fs::read_to_string(&served).expect("a start is charged");
+        assert_eq!(text.trim(), "1 alice");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_weight_is_clamped_to_the_kernel_range() {
+        let (dir, locks) = scratch("weight-clamp");
+        let low = Scheduler::new(vec![host("w", 1, &[])], locks, Duration::from_secs(60))
+            .with_client("alice", 0);
+        assert_eq!(low.weight, 1);
+        assert_eq!(low.with_client("alice", 5000).weight, 1000);
+        assert_eq!(
+            Scheduler::new(
+                vec![],
+                Arc::new(LockDir::new(&dir)),
+                Duration::from_secs(60)
+            )
+            .weight,
+            100
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

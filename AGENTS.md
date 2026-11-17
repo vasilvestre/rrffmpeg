@@ -30,6 +30,7 @@ Layout: `src/main.rs` wires the dispatch, `config.rs` reads TOML, `paths.rs`
 maps client to worker roots, `transport.rs` picks SSH or the agent per host,
 `agent.rs` is the agent protocol and daemon, `state.rs` is the WAL and its
 flusher, `stats.rs` reads the journal back, `scheduler.rs` places jobs,
+`queue.rs` orders the waiters,
 `janitor.rs` repairs state.
 `config.example.toml` is the production pair.
 
@@ -124,7 +125,10 @@ Every decision that shapes the code gets a record in `docs/adr/`. The index is
 3. Async WAL bookkeeping plus an in-process janitor (retest hosts, reap
    orphans, requeue). Host selection uses an in-memory counter so async
    writes cannot undercount.
-4. Only then: priority, capability detection, agent transport.
+4. Only then: priority, capability detection, agent transport. All three are
+   in. Priority is a ticket queue under `state_dir/coord/<host>/queue/`, with a
+   `client_weight` per client that only counts while two clients wait; read ADR
+   0012 before touching `scheduler.rs` or `queue.rs`.
 
 ## Success criterion
 

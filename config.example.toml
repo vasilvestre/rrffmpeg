@@ -25,6 +25,16 @@ state_dir = "/home/alice/.local/state/rrffmpeg"
 # state_dir must be on a local filesystem, or the slot cap silently falls open.
 down_ttl_secs = 60
 
+# Clients that share a worker must share this state_dir, and must not share a
+# client_name. Defaults to the hostname.
+# client_name = "client"
+
+# Share of a busy worker, 1 to 1000, same scale as the kernel's BFQ IO weight.
+# Read only while two clients wait for the same host: a client alone keeps
+# taking every slot. 400 here means four starts for one start of a client at
+# 100. Job classes still win: a probe goes before a transcode of either client.
+# client_weight = 100
+
 [[hosts]]
 name = "worker"
 concurrency = 2

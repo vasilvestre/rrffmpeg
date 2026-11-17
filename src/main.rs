@@ -53,11 +53,14 @@ fn run() -> Result<i32> {
     }
 
     let journal = Arc::new(Journal::open(&config.state_dir)?);
-    let scheduler = Arc::new(Scheduler::new(
-        config.hosts.clone(),
-        Arc::new(LockDir::new(&config.state_dir)),
-        Duration::from_secs(config.down_ttl_secs),
-    ));
+    let scheduler = Arc::new(
+        Scheduler::new(
+            config.hosts.clone(),
+            Arc::new(LockDir::new(&config.state_dir)),
+            Duration::from_secs(config.down_ttl_secs),
+        )
+        .with_client(config.client_name.clone(), config.client_weight),
+    );
     let transport: Arc<dyn Transport> = Arc::new(Router {
         ssh: Ssh::new(config.ssh_bin.clone()),
         agent,

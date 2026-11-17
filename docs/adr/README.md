@@ -21,5 +21,6 @@ ADR-NNNN` and add the new record.
 | [0009](0009-agent-transport.md) | An agent daemon as a second transport | Accepted, transport superseded by [0010](0010-agent-tls.md) |
 | [0010](0010-agent-tls.md) | TLS with one pinned certificate, one connection per direction | Accepted |
 | [0011](0011-journal-timings.md) | The journal carries its own timings, read back by `rrffmpeg-stats` | Accepted |
+| [0012](0012-shared-queue-with-client-weight.md) | A shared ticket queue orders starts, with a weight per client | Accepted |
 
 All records dated 2026-11-17.
