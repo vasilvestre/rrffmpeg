@@ -54,6 +54,22 @@ comes from it, not from speculation.
 - No priority, no per-host concurrency cap, no capability detection, no path
   mapping, no retry, a per-job SSH health probe.
 
+## Deployment facts that break dispatchers
+
+- Jellyfin derives ffprobe from the ffmpeg path: `/usr/local/bin/ffmpeg` gives
+  `/usr/local/bin/ffprobe`. Install both names as symlinks to this binary. Do
+  not point Jellyfin at `rrffmpeg`, it would look for `rrffprobe`.
+- Media inputs arrive as `file:/abs/path`, never as a bare path. Path mapping
+  handles the prefix; a rule that only matches a leading `/` maps nothing.
+- Jellyfin writes `q`, `p`, `u`, `c` to stdin, and some of those have no
+  newline. stdio must be a plain pipe, never a pty. The SSH transport uses
+  `-T` for that reason.
+- Progress comes from ffmpeg's stderr stats lines. Never merge stderr into
+  stdout for a transcode, and never prefix lines.
+- Startup probes (`-version`, `-encoders`, `-hwaccels`, `-h ...`) are parsed
+  from stdout and run through the dispatcher too, so they must reach the
+  worker and come back on stdout unchanged.
+
 ## What NOT to build
 
 - No transcoding logic. rrffmpeg only dispatches args to ffmpeg on the right

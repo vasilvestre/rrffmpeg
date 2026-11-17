@@ -10,16 +10,45 @@
 
 use crate::Host;
 use std::ffi::OsString;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
+
+/// Jellyfin prefixes local media inputs with `file:` (EncodingUtils), so a rule
+/// that only matches a leading `/` misses every real input path.
+const FILE_PREFIX: &[u8] = b"file:";
 
 /// Rewrite a client path for the worker.
 pub fn to_worker(host: &Host, path: &OsString) -> OsString {
-    rewrite(host, path, true)
+    map_arg(host, path, true)
 }
 
 /// Rewrite a worker path back to the client root.
 pub fn to_client(host: &Host, path: &OsString) -> OsString {
-    rewrite(host, path, false)
+    map_arg(host, path, false)
+}
+
+/// Maps a whole argument: a bare path, or a `file:` token with the path inside.
+/// Other schemes (`http://`, `pipe:`, `-vf`) are left alone.
+fn map_arg(host: &Host, arg: &OsString, forward: bool) -> OsString {
+    let bytes = arg.as_bytes();
+    let Some(rest) = bytes.strip_prefix(FILE_PREFIX) else {
+        return rewrite(host, arg, forward);
+    };
+    let rest = OsString::from_vec(rest.to_vec());
+    let mut out = OsString::from("file:");
+    // .NET strips the quotes before exec, but keep them if they are there.
+    let quoted = rest.as_bytes().len() >= 2
+        && rest.as_bytes().first() == Some(&b'"')
+        && rest.as_bytes().last() == Some(&b'"');
+    if quoted {
+        let inner = OsString::from_vec(rest.as_bytes()[1..rest.as_bytes().len() - 1].to_vec());
+        out.push("\"");
+        out.push(rewrite(host, &inner, forward));
+        out.push("\"");
+    } else {
+        out.push(rewrite(host, &rest, forward));
+    }
+    out
 }
 
 /// `forward` selects the rule direction: `from` -> `to` for the worker,
@@ -219,6 +248,52 @@ mod tests {
         assert_eq!(
             to_worker(&h, &os("home/vasilves/film.mkv")),
             os("home/vasilves/film.mkv")
+        );
+    }
+
+    #[test]
+    fn a_file_prefixed_input_is_mapped_inside_the_prefix() {
+        // Jellyfin sends `file:/abs/path`, never a bare path.
+        let h = production();
+        assert_eq!(
+            to_worker(&h, &os("file:/home/vasilves/media/film.mkv")),
+            os("file:/home/my666/le4/media/film.mkv")
+        );
+    }
+
+    #[test]
+    fn file_prefix_mapping_survives_dotnet_style_quotes_and_spaces() {
+        let h = production();
+        assert_eq!(
+            to_worker(&h, &os("file:\"/home/vasilves/my film.mkv\"")),
+            os("file:\"/home/my666/le4/my film.mkv\"")
+        );
+        assert_eq!(
+            to_worker(&h, &os("file:/home/vasilves/my film.mkv")),
+            os("file:/home/my666/le4/my film.mkv")
+        );
+    }
+
+    #[test]
+    fn other_schemes_and_plain_filters_are_untouched() {
+        let h = production();
+        for arg in [
+            "http://example.invalid/live.m3u8",
+            "pipe:0",
+            "-vf",
+            "tonemap_opencl=tonemap=hable",
+            "file:relative.mkv",
+        ] {
+            assert_eq!(to_worker(&h, &os(arg)), os(arg), "{arg} must not change");
+        }
+    }
+
+    #[test]
+    fn the_reverse_direction_maps_a_file_token_too() {
+        let h = production();
+        assert_eq!(
+            to_client(&h, &os("file:/home/my666/le4/media/film.mkv")),
+            os("file:/home/vasilves/media/film.mkv")
         );
     }
 }

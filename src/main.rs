@@ -32,7 +32,7 @@ fn run() -> Result<i32> {
     let argv0 = argv.next().unwrap_or_default();
     let args: Vec<OsString> = argv.collect();
 
-    let program = program_for(&argv0);
+    let program = program_for(&argv0, &args);
     let config = Config::load()?;
     let stderr_as_stdout =
         config.stderr_as_stdout || std::env::var_os("RRFFMPEG_STDERR_AS_STDOUT").is_some();
@@ -134,19 +134,37 @@ fn required_capability(args: &[OsString]) -> Option<String> {
     None
 }
 
-fn program_for(argv0: &OsString) -> Program {
+fn program_for(argv0: &OsString, args: &[OsString]) -> Program {
     if let Some(p) = std::env::var_os("RRFFMPEG_PROGRAM") {
         if p.eq_ignore_ascii_case("ffprobe") {
             return Program::Ffprobe;
         }
         return Program::Ffmpeg;
     }
-    // Jellyfin rewrites EncoderPath, so the binary name is the only hint.
+    // Jellyfin rewrites EncoderPath, so the binary name is the first hint.
     let name = std::path::Path::new(argv0)
         .file_name()
         .map(|n| n.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
     if name.contains("probe") {
+        return Program::Ffprobe;
+    }
+    // One name still gets both tools, so fall back to the argument shape.
+    const PROBE_FLAGS: [&str; 8] = [
+        "-print_format",
+        "-show_streams",
+        "-show_format",
+        "-show_chapters",
+        "-show_frames",
+        "-show_entries",
+        "-select_streams",
+        "-show_packets",
+    ];
+    let looks_like_probe = args.iter().any(|a| {
+        let text = a.to_string_lossy();
+        PROBE_FLAGS.contains(&text.as_ref())
+    });
+    if looks_like_probe {
         Program::Ffprobe
     } else {
         Program::Ffmpeg
@@ -160,4 +178,75 @@ fn job_id() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{nanos}-{}", std::process::id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(items: &[&str]) -> Vec<OsString> {
+        items.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn the_binary_name_picks_the_tool() {
+        assert_eq!(
+            program_for(&OsString::from("/usr/local/bin/ffprobe"), &[]),
+            Program::Ffprobe
+        );
+        assert_eq!(
+            program_for(&OsString::from("/usr/local/bin/ffmpeg"), &[]),
+            Program::Ffmpeg
+        );
+    }
+
+    #[test]
+    fn probe_arguments_pick_ffprobe_on_a_single_name_install() {
+        let a = args(&[
+            "-v",
+            "warning",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "file:/m/x.mkv",
+        ]);
+        assert_eq!(
+            program_for(&OsString::from("/usr/local/bin/rrffmpeg"), &a),
+            Program::Ffprobe
+        );
+    }
+
+    #[test]
+    fn a_transcode_stays_ffmpeg() {
+        let a = args(&[
+            "-i",
+            "file:/m/x.mkv",
+            "-c:v",
+            "h264_vaapi",
+            "-f",
+            "hls",
+            "/tmp/out.m3u8",
+        ]);
+        assert_eq!(
+            program_for(&OsString::from("/usr/local/bin/rrffmpeg"), &a),
+            Program::Ffmpeg
+        );
+    }
+
+    #[test]
+    fn capability_comes_from_the_encoder_name() {
+        assert_eq!(
+            required_capability(&args(&["-c:v", "hevc_vaapi", "-i", "/m/x.mkv"])),
+            Some("vaapi".into())
+        );
+        assert_eq!(
+            required_capability(&args(&["-hwaccel", "nvenc", "-i", "/m/x.mkv"])),
+            Some("nvenc".into())
+        );
+        assert_eq!(
+            required_capability(&args(&["-c:v", "libx264", "-i", "/m/x.mkv"])),
+            None
+        );
+        assert_eq!(required_capability(&args(&["-c", "copy"])), None);
+    }
 }
