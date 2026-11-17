@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rrffmpeg: a dispatcher for Jellyfin transcodes</title>
+<meta name="description" content="rrffmpeg stands in for ffmpeg inside Jellyfin and sends each transcode to a machine that has the GPU. Arguments pass through unchanged.">
+<style>
+  :root {
+    --fg: #1b1d1e;
+    --muted: #5c6165;
+    --line: #d9dcde;
+    --accent: #0b6b57;
+    --bg-code: #f4f5f4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #e8eaea;
+      --muted: #a0a6a9;
+      --line: #33383b;
+      --accent: #4fd1a5;
+      --bg-code: #1e2223;
+    }
+    body { background: #141718; }
+  }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0 auto;
+    padding: 2.5rem 1.25rem 5rem;
+    max-width: 46rem;
+    color: var(--fg);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  h1, h2, h3 { line-height: 1.25; }
+  h1 { font-size: 2rem; margin-bottom: .25rem; }
+  h2 { font-size: 1.35rem; margin-top: 2.75rem; border-bottom: 1px solid var(--line); padding-bottom: .35rem; }
+  h3 { font-size: 1.05rem; margin-top: 1.75rem; }
+  p.lead { color: var(--muted); margin-top: 0; }
+  a { color: var(--accent); }
+  code {
+    font: 0.9em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--bg-code);
+    padding: .1em .35em;
+    border-radius: 4px;
+  }
+  pre {
+    background: var(--bg-code);
+    padding: 1rem;
+    border-radius: 6px;
+    overflow-x: auto;
+    font: 0.85rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .94rem; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; }
+  td:first-child { white-space: nowrap; }
+  ul { padding-left: 1.2rem; }
+  li { margin: .35rem 0; }
+  .facts { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.25rem 0; padding: 0; list-style: none; }
+  .facts li {
+    margin: 0;
+    padding: .55rem .8rem;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    font-size: .9rem;
+  }
+  .facts b { display: block; font-size: 1.15rem; }
+  footer { margin-top: 4rem; color: var(--muted); font-size: .85rem; }
+</style>
+</head>
+<body>
+
+<h1>rrffmpeg</h1>
+<p class="lead">A correct dispatcher for Jellyfin transcodes. It stands in for
+<code>ffmpeg</code> and sends each job to the machine that has the GPU. It
+never touches video quality, remuxing or encoding. Only dispatch.</p>
+
+<p>Written in Rust. One dependency-free static binary, no daemon on the client,
+no database.</p>
+
+<h2>Why it exists</h2>
+
+<p>The maintained options are weak. The Python
+<a href="https://github.com/joshuaboniface/rffmpeg">rffmpeg</a> commits to
+SQLite with an fsync between "decide to run" and "run ffmpeg", marks a GPU host
+bad forever after one SSH error, and leaves orphan rows on <code>SIGKILL</code>.
+<a href="https://github.com/aleksasiriski/rffmpeg-go">rffmpeg-go</a> is archived.
+<a href="https://github.com/brwyatt/dffmpeg">dffmpeg</a> has the right
+architecture but is beta.</p>
+
+<p>Meanwhile the layout "small GPU node plus separate storage host" is common in
+home labs: an Intel N100 with QuickSync on one side, the NAS on the other. The
+people running it have no maintained dispatcher.</p>
+
+<ul class="facts">
+  <li><b>64 ms</b>dispatch with the journal on tmpfs</li>
+  <li><b>2 to 4 s</b>the same dispatch when the fsync sits on the hot path</li>
+  <li><b>1.54x</b>realtime, 4K HEVC HDR with <code>tonemap_opencl</code></li>
+  <li><b>2.67x</b>realtime, 1080p SDR</li>
+</ul>
+
+<h2>Features</h2>
+
+<ul>
+  <li><b>Exact argument passthrough.</b> <code>file:</code> prefixes, startup
+  probes (<code>-version</code>, <code>-encoders</code>), stdin write from
+  Jellyfin, stderr stats on stderr. Nothing is rewritten.</li>
+  <li><b>One binary, two names.</b> Symlink it as <code>ffmpeg</code> and
+  <code>ffprobe</code>, because Jellyfin derives ffprobe from the ffmpeg
+  path.</li>
+  <li><b>Bookkeeping off the hot path.</b> An append-only journal with a
+  background flusher. The transcode starts at once.</li>
+  <li><b>In-process janitor.</b> Retests unhealthy hosts, reaps orphans,
+  requeues. No cron watchdog.</li>
+  <li><b>Cross-process concurrency cap.</b> One lock file per worker slot,
+  freed by the kernel when the process dies. The "host down" verdict is shared
+  with an expiry, so one failure does not poison the others.</li>
+  <li><b>Capability-aware placement.</b> Workers advertise
+  <code>vaapi</code>, <code>nvenc</code>, <code>qsv</code> and their slot
+  count. The scheduler matches instead of applying a global weight.</li>
+  <li><b>Path mapping in both directions.</b> Longest-prefix mapping for input
+  and output, so the worker can mount media and the HLS tmpfs at another
+  root.</li>
+  <li><b>SSH transport.</b> Zero install on the worker. A tiny agent daemon is
+  planned to remove the per-job probe.</li>
+  <li><b>Priority as a hint.</b> Probes poll for a slot faster than transcodes.
+  Ordering across processes waits for the agent.</li>
+</ul>
+
+<h2>Install</h2>
+
+<p>Every <code>v*</code> tag publishes static Linux builds for
+<code>x86_64</code> and <code>aarch64</code> on the
+<a href="https://github.com/vasilvestre/rrfmpeg/releases">releases page</a>,
+with a checksum next to each tarball. A static build needs no toolchain and no
+matching glibc on the Jellyfin host.</p>
+
+<pre><code>curl -LO https://github.com/vasilvestre/rrfmpeg/releases/latest/download/rrffmpeg-x86_64-unknown-linux-musl.tar.gz
+sha256sum -c rrffmpeg-x86_64-unknown-linux-musl.tar.gz.sha256
+tar xzf rrffmpeg-x86_64-unknown-linux-musl.tar.gz
+sudo install -m 755 rrffmpeg-x86_64-unknown-linux-musl/rrffmpeg /usr/local/bin/rrffmpeg
+sudo ln -sf /usr/local/bin/rrffmpeg /usr/local/bin/ffmpeg
+sudo ln -sf /usr/local/bin/rrffmpeg /usr/local/bin/ffprobe</code></pre>
+
+<p>Point Jellyfin at <code>/usr/local/bin/ffmpeg</code>. Without a config file
+the binary runs the local ffmpeg and does nothing else, so the install is safe
+before the worker exists.</p>
+
+<h2>Configuration</h2>
+
+<p>The file is read from <code>$RRFFMPEG_CONFIG</code>, then
+<code>$XDG_CONFIG_HOME/rffmpeg/config.toml</code>, then
+<code>~/.config/rffmpeg/config.toml</code>. Missing keys take the defaults
+below.</p>
+
+<h3>Top level</h3>
+
+<table>
+  <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>hosts</code></td><td><code>[]</code></td><td>Workers. Empty means every job runs locally.</td></tr>
+    <tr><td><code>state_dir</code></td><td><code>~/.local/state/rrffmpeg</code></td><td>Journal, pid files and the coordinator slot files. Put it on a local filesystem; a slow disk adds fsync latency, it must not be shared over NFS.</td></tr>
+    <tr><td><code>queue_wait_secs</code></td><td><code>600</code></td><td>How long a job waits for a free worker slot before running locally.</td></tr>
+    <tr><td><code>down_ttl_secs</code></td><td><code>60</code></td><td>How long one process's "host down" verdict is trusted by the others. Expiry is the repair mechanism.</td></tr>
+    <tr><td><code>stderr_as_stdout</code></td><td><code>false</code></td><td>Copy ffmpeg stderr to stdout, for Jellyfin builds that read probe output there.</td></tr>
+    <tr><td><code>ssh_bin</code></td><td><code>ssh</code></td><td>SSH client used for the transport.</td></tr>
+    <tr><td><code>local_ffmpeg</code></td><td><code>ffmpeg</code></td><td>Binary used when a job runs locally. Point it away from the symlink or you loop.</td></tr>
+    <tr><td><code>local_ffprobe</code></td><td><code>ffprobe</code></td><td>Same, for ffprobe.</td></tr>
+  </tbody>
+</table>
+
+<h3>One host</h3>
+
+<table>
+  <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>name</code></td><td>required</td><td>SSH target: a hostname or an alias from <code>~/.ssh/config</code>.</td></tr>
+    <tr><td><code>concurrency</code></td><td><code>1</code></td><td>Slots on this host. Each slot is an exclusive lock file, so a forked job cannot exceed it.</td></tr>
+    <tr><td><code>capabilities</code></td><td><code>[]</code></td><td>Advertised encoders, for example <code>["vaapi"]</code>.</td></tr>
+    <tr><td><code>ffmpeg_bin</code></td><td>inherited</td><td>ffmpeg path on the worker.</td></tr>
+    <tr><td><code>ffprobe_bin</code></td><td>inherited</td><td>ffprobe path on the worker.</td></tr>
+    <tr><td><code>paths</code></td><td><code>[]</code></td><td>Path maps, see below.</td></tr>
+  </tbody>
+</table>
+
+<h3>Path maps</h3>
+
+<p>Each entry rewrites a client prefix to a worker prefix, longest match first.
+The host probe stats every <code>to</code> root, so a dead mount marks the host
+down instead of failing each job with <code>ENOENT</code>. Map input and output
+separately: media and the HLS tmpfs are usually two different mounts.</p>
+
+<h3>Example</h3>
+
+<pre><code>state_dir = "/home/alice/.local/state/rrffmpeg"
+down_ttl_secs = 60
+
+[[hosts]]
+name = "worker"
+concurrency = 2
+capabilities = ["vaapi"]
+
+# Input: media mounted at a different root on the worker.
+[[hosts.paths]]
+from = "/home/alice"
+to = "/home/bob/media"
+
+# Output: HLS segments on the client tmpfs, through a second mount.
+[[hosts.paths]]
+from = "/dev/shm/jellyfin-transcode"
+to = "/home/bob/transcode"</code></pre>
+
+<h2>Status</h2>
+
+<p>Working today: passthrough verified against real ffmpeg 8.0.1, one worker
+over SSH, path mapping both ways, journal plus janitor, per-host cap,
+capability match. Not yet: requeue after a dead client (needs the agent),
+priority ordering across processes, recorded-invocation replay.</p>
+
+<p>Design choices and their costs are written down in the
+<a href="adr/README.html">decision records</a>.</p>
+
+<footer>
+  <a href="https://github.com/vasilvestre/rrfmpeg">Source</a> ·
+  <a href="https://github.com/vasilvestre/rrfmpeg/releases">Releases</a> ·
+  <a href="https://github.com/vasilvestre/rrfmpeg/issues">Issues</a>
+</footer>
+
+</body>
+</html>
