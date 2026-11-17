@@ -273,6 +273,10 @@ Measured on 2026-11-17 on the production pair:
   ms p50 for rffmpeg, 7.23 ms for rrffmpeg over SSH and 1.56 ms through the
   agent. With the real `ffmpeg -version`: 117.26 ms against 33.40 and 27.77 ms,
   for a 24.18 ms local baseline. Raw runs in `docs/compare-rffmpeg.md`.
+- On the production pair, same probe from the Jellyfin host to the GPU worker:
+  206.4 ms p50 for rffmpeg, 52.4 ms for rrffmpeg, 30.1 ms locally. Dispatch
+  alone: 155.8 ms against 32.8 ms. The journal on the host's own disk instead
+  of tmpfs adds 39 ms. Raw runs in `docs/compare-rffmpeg.md`.
 
 ## Install
 

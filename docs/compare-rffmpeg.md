@@ -1,12 +1,21 @@
-# rffmpeg against rrffmpeg, one box
+# rffmpeg against rrffmpeg, measured
 
 How much does each dispatcher add between "Jellyfin calls ffmpeg" and "ffmpeg
 starts"? The project pitch says rffmpeg waits on a database commit and probes
-the worker on every job. This page puts both programs through the same harness
-on the same machine and shows the cost.
+the worker on every job. This page puts both programs through the same harness,
+twice: on one controlled box, then on the production pair this project
+replaces.
 
-Every row was produced with the setup below, in one session, on 2026-11-17.
-Measurements are milliseconds. Percentiles are nearest rank.
+Both settings were measured on 2026-11-17. Measurements are milliseconds.
+Percentiles are nearest rank.
+
+## In this page
+
+- **Test box**: one loopback machine, both programs, 60 samples, low load. The
+  controlled numbers.
+- **Production pair**: the real Jellyfin host and its GPU worker, 20 rounds
+  interleaved, load 10. The numbers that matter. Jump to
+  [On the production pair](#on-the-production-pair).
 
 ## What is compared
 
@@ -16,14 +25,15 @@ Measurements are milliseconds. Percentiles are nearest rank.
 | rrffmpeg | 0.3.0 | SSH, `ssh_persist_secs = 300` |
 | rrffmpeg | 0.3.0 | `rrffmpeg-agent` on `127.0.0.1:9876` |
 
-All four send the job to `127.0.0.2`, an address served by the sshd on the same
-box. rffmpeg runs its own `ffmpeg` symlink from a checkout, rrffmpeg runs the
-release binary. Both reach `/usr/bin/ffmpeg` 8.0.1 on the worker side.
+On the test box all four send the job to `127.0.0.2`, an address served by the
+sshd on the same box. rffmpeg runs its own `ffmpeg` symlink from a checkout,
+rrffmpeg runs the release binary. Both reach `/usr/bin/ffmpeg` 8.0.1 on the
+worker side.
 
 The job is `-version`, first with the real ffmpeg, then with `/bin/true` in
 place of ffmpeg to remove codec work and keep only the dispatch.
 
-## Machine
+## Test box
 
 | | |
 |---|---|
@@ -40,6 +50,10 @@ One harness for all rows: `scripts/measure.py`. It drops 5 warmup runs, keeps
 `/dev/null`. The SSH control master is already open, so every row measures the
 steady state and not the first connection. rffmpeg keeps its persistence at the
 default 300 s.
+
+The production section uses the `--pair` mode of the same script: two commands,
+run one after the other, so a slow drift in the host hits both equally. It
+drops 3 warmup rounds and keeps 20.
 
 ```bash
 cargo build --release
@@ -176,16 +190,83 @@ cost measured above. The code path is the defect, not this disk: the commit sits
 between "decide to run" and "run". rrffmpeg appends to a journal and returns, so
 neither a quiet disk nor a busy one reaches the job start.
 
+## On the production pair
+
+The deployment this project replaces moved from rffmpeg to rrffmpeg on
+2026-11-17. Both programs were still on the client, so the comparison can run
+there: same Jellyfin host, same worker, same SSH key, same worker shim.
+
+| | client | worker |
+|---|---|---|
+| Role | Jellyfin, dispatcher | GPU, VAAPI, `tonemap_opencl` |
+| CPU | 16 threads, shared host | Intel N100 |
+| Load during the runs | 9 to 13 on 16 threads | idle |
+| State | `/dev/shm` (tmpfs) or the shared ext4 root at 87% full | none |
+| Worker ffmpeg | | jellyfin-ffmpeg 7.1.4 |
+
+Commands: `ffmpeg -version` through each dispatcher, 20 rounds interleaved so
+drift hits both equally, 3 warmup rounds dropped, SSH control master open.
+
+```bash
+python3 scripts/measure.py --pair 20 \
+  "RFFMPEG_CONFIG=~/rffmpeg.yml ffmpeg -version" \
+  "RRFFMPEG_CONFIG=~/config.toml rrffmpeg -version"
+```
+
+| Job | p50 | p90 | p99 |
+|---|---|---|---|
+| rffmpeg, state on tmpfs | 206.4 | 234.3 | 258.5 |
+| rrffmpeg, old worker shim | 52.4 | 69.7 | 143.6 |
+| rrffmpeg, new worker shim | 53.8 | 78.3 | 101.4 |
+
+The local `jellyfin-ffmpeg -version` on the client takes 30.1 ms p50, so the
+dispatcher adds 176 ms for rffmpeg and 23 ms for rrffmpeg.
+
+Both worker shims run the same `jellyfin-ffmpeg`, and the old one differs only
+by the path loop it runs first. The two rrffmpeg rows show it costs nothing
+measurable.
+
+Dispatch alone, worker ffmpeg replaced by `/bin/true`, two passes of 25 rounds:
+
+| Row | pass 1 | pass 2 |
+|---|---|---|
+| rffmpeg, state on tmpfs | 155.8 | 164.3 |
+| rrffmpeg, state on tmpfs | 32.8 | 34.1 |
+| rrffmpeg, state on the shared ext4 | 71.7 | 73.6 |
+
+Three things to read here.
+
+- rffmpeg costs 4.8 times rrffmpeg before any ffmpeg runs. The client is a
+  shared seedbox at load 10, so Python startup and imports, measured at 34.5 ms
+  on an idle laptop, cost far more here, and rffmpeg opens two SSH sessions per
+  job: one for its health probe, one for the job.
+- rffmpeg runs the worker ffmpeg twice, once for the probe and once for the
+  job. rrffmpeg runs it once. That is the extra gap in the table above: 154 ms
+  in the real row against 123 ms in the dispatch row, with one ffmpeg start
+  costing about 25 ms on this worker.
+- The journal filesystem still matters. On the client's own disk, 87% full and
+  shared with everything else, rrffmpeg is 39 ms slower per dispatch than on
+  tmpfs. That is the 2 to 4 s production defect in miniature, and it is why the
+  production config puts `state_dir` on `/dev/shm`.
+
+The absolute values move between passes. A wider pass with eight rows on the
+same box gave 342.8 and 366.1 for rffmpeg, and 116.0 to 143.6 for rrffmpeg,
+with the load no lower. The ratio did not move: 2.9 to 3.9 times in favour of
+rrffmpeg, and 4.8 times on the dispatch alone.
+
 ## What this does not cover
 
-- A real network. Everything is loopback, and both ends share one CPU, so the
-  SSH rows carry no wire latency and no encryption cost worth naming.
-- A real worker and a real transcode. Nothing here encodes, and the GPU is out
-  of the picture. Encode throughput is unaffected by the dispatcher either way.
+- A transcode. Every row is `-version` or `/bin/true`. Nothing encodes, so this
+  page says nothing about GPU throughput.
 - Large output. `/bin/true` and `-version` print little, so a big passthrough
   such as `-encoders` is not in these rows.
-- rffmpeg under load or with several hosts. One host, no queue, no concurrency.
-- The one-week production criterion. This is one box, one hour.
+- One host, no queue, no concurrency. rffmpeg with several workers, or a full
+  slot, is not measured.
+- A quiet production box. The Jellyfin host is a shared machine at load 10, and
+  other tenants move the absolute numbers by up to a factor of 1.8 between
+  passes. The test box rows carry loopback only, so they lose the wire latency
+  and show no queueing.
+- The one-week production criterion. This is one hour on each setting.
 
 Next:
 

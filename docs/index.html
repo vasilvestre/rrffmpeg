@@ -120,9 +120,16 @@ by <code>/bin/true</code> to isolate the dispatch, then the real
 
 <p>rffmpeg spends about 55 ms before any transport: Python start, its imports
 and four SQLite commits. Its per-job health probe then opens a second SSH
-connection and starts ffmpeg twice, which is why a 24 ms probe becomes 117 ms.
-On the shared disk of the production box the same commit waited 2 to 4 seconds.
-The method, the raw runs and the rffmpeg config are in
+connection and starts ffmpeg twice, which is why a 24 ms probe becomes 117 ms.</p>
+
+<p>On the production pair, the same probe sent from the Jellyfin host to its GPU
+worker takes <b>206.4 ms</b> p50 through rffmpeg and <b>52.4 ms</b> through
+rrffmpeg, against 30.1 ms locally. The dispatch alone is 155.8 ms against
+32.8 ms, and rffmpeg runs the worker ffmpeg twice per job: once for its health
+probe, once for the job. With rrffmpeg's journal on the host's own disk instead
+of tmpfs, the dispatch rises by 39 ms.</p>
+
+<p>The method, the raw runs and the rffmpeg config are in
 <a href="https://github.com/vasilvestre/rrffmpeg/blob/main/docs/compare-rffmpeg.md">compare-rffmpeg.md</a>.</p>
 
 <h2>Features</h2>
