@@ -22,19 +22,28 @@ maps client to worker roots, `transport.rs` speaks SSH, `state.rs` is the WAL
 and its flusher, `scheduler.rs` places jobs, `janitor.rs` repairs state.
 `config.example.toml` is the production pair.
 
+## This repository is public
+
+Never commit a real hostname, a real user name, an absolute path taken from a
+real machine, or a credential. Use the placeholders: `client`, `worker`,
+`/home/alice`, `/home/bob/media`, `/home/bob/transcode`. Real values stay in
+the private homelab notes. Check before every push: `git grep -n "/home/"`
+must only show `alice` and `bob`, and no `name = ` under `[[hosts]]` may name
+a real machine.
+
 ## Ground truth: the production deployment it must replace
 
 This project exists because of a real, running setup. Every requirement below
-comes from it, not from speculation.
+comes from it, not from speculation. The names and paths below are
+placeholders, not the real ones.
 
-- **Client**: caroline, a headless box with no GPU. Jellyfin runs natively; its
+- **Client** (`client`): a headless box with no GPU. Jellyfin runs natively; its
   `ffmpeg` is a symlink to the dispatcher.
-- **Worker**: virmire, an Intel N100 with VAAPI on `/dev/dri/renderD128`,
+- **Worker** (`worker`): an Intel N100 with VAAPI on `/dev/dri/renderD128`,
   `tonemap_opencl` for HDR.
-- **Path mapping is mandatory**: the worker reads the media over an rclone
-  mount at a different root (`/home/my666/le4/...`) than the client
-  (`/home/vasilves/...`). Today this needs a per-worker wrapper script;
-  rrffmpeg should do it natively.
+- **Path mapping is mandatory**: the worker reads the media from a mount at a
+  different root (`/home/bob/media/...`) than the client (`/home/alice/...`).
+  Today this needs a per-worker wrapper script; rrffmpeg must do it natively.
 - **Output path**: HLS segments land back on the client's tmpfs
   (`/dev/shm/jellyfin-transcode`), reached on the worker through a second
   mount. Path mapping must cover output as well as input.
@@ -100,7 +109,7 @@ dispatch p99 under 50 ms.
 - rffmpeg-go (archived): https://github.com/aleksasiriski/rffmpeg-go
 - dffmpeg (the job model to borrow): https://github.com/brwyatt/dffmpeg
 - The production setup and its failure modes: `~/homelab/docs/rffmpeg.md`
-  and the caroline changelog.
+  and its changelog.
 
 ## Style
 

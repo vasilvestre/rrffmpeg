@@ -8,19 +8,19 @@ stderr_as_stdout = false
 
 # Journal and pid files. Put it on tmpfs if the disk is slow, the journal is
 # append-only and survives a reboot only for the janitor's benefit.
-state_dir = "/home/vasilves/.local/state/rrffmpeg"
+state_dir = "/home/alice/.local/state/rrffmpeg"
 
 [[hosts]]
-name = "virmire"
+name = "worker"
 concurrency = 2
 capabilities = ["vaapi"]
 
 # Input: media mounted at a different root on the worker.
 [[hosts.paths]]
-from = "/home/vasilves"
-to = "/home/my666/le4"
+from = "/home/alice"
+to = "/home/bob/media"
 
 # Output: HLS segments on the client tmpfs, reached through a second mount.
 [[hosts.paths]]
 from = "/dev/shm/jellyfin-transcode"
-to = "/home/my666/transcode"
+to = "/home/bob/transcode"

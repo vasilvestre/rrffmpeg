@@ -26,7 +26,7 @@ can rot.
 
 ## Record on the production pair
 
-Do this on caroline, in front of Jellyfin. The recorder `exec`s the real
+Do this on the client, in front of Jellyfin. The recorder `exec`s the real
 command, so playback is not disturbed and the exit code is unchanged.
 
 1. Install the recorder and its log directory.

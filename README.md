@@ -25,9 +25,9 @@ people running it have no maintained dispatcher.
 
 ## What is actually wrong with rffmpeg today
 
-These are measured, not theoretical. Source: a production Jellyfin box
-(caroline, no GPU) sending transcodes to a worker (virmire, Intel N100
-VAAPI), see the "Evidence" section.
+These are measured, not theoretical. Source: a production Jellyfin box (called `client`, no GPU) sending
+transcodes to a worker (called `worker`, Intel N100 with VAAPI), see the
+"Evidence" section.
 
 1. **Bookkeeping sits on the critical path.** Each dispatch opens the SQLite
    DB, inserts a `processes` and a `states` row, and commits with an fsync,
@@ -106,9 +106,9 @@ Ship the smallest thing that is strictly better than rffmpeg. State today:
 - [ ] Priority across processes: the queue is per process until the daemon
   exists.
 - [ ] No commit and no replay of production invocations yet. `docs/replay.md`
-  explains how to record them on caroline.
+  explains how to record them on the client.
 
-Success criterion: our production pair (caroline → virmire) runs on rrffmpeg
+Success criterion: the production pair (`client` → `worker`) runs on rrffmpeg
 for a week, dispatch p99 under 50 ms, and nobody has to run a repair command.
 
 ## Later
