@@ -147,36 +147,32 @@ impl Tap {
         *slot = Some(verdict.to_string());
     }
 
-    /// The last stats line wins: it reports the job as a whole, not a moment.
+    /// `fps` and `speed` are running averages since the job started, so the
+    /// last line is not the throughput: startup drags it down, and a stall or
+    /// a stream pause leaves the frame count behind while the clock runs. Keep
+    /// the highest average reached, which is what the player measured live.
     fn counters(&mut self, line: &str) {
-        for token in line.split(' ') {
-            let Some((key, value)) = token.split_once('=') else {
-                continue;
-            };
-            let value = value.trim();
-            match key {
-                // `fps= 23.98` and `fps=N/A` both happen.
-                "fps" => {
-                    if let Ok(v) = value.parse::<f64>() {
-                        self.stats.fps = Some(v);
-                    }
-                }
-                // `speed=1.02x`
-                "speed" => {
-                    if let Ok(v) = value.trim_end_matches('x').parse::<f64>() {
-                        self.stats.speed = Some(v);
-                    }
-                }
-                // `bitrate=1116.0kbits/s`
-                "bitrate" => {
-                    if let Ok(v) = value.trim_end_matches("kbits/s").parse::<f64>() {
-                        self.stats.kbps = Some(v);
-                    }
-                }
-                _ => {}
-            }
+        if let Some(fps) = number_after(line, "fps=") {
+            self.stats.fps = Some(fps.max(self.stats.fps.unwrap_or(0.0)));
+        }
+        if let Some(speed) = number_after(line, "speed=") {
+            self.stats.speed = Some(speed.max(self.stats.speed.unwrap_or(0.0)));
+        }
+        // The bitrate is a moment, not a running total, so the last one wins.
+        if let Some(kbps) = number_after(line, "bitrate=") {
+            self.stats.kbps = Some(kbps);
         }
     }
+}
+
+/// The number that follows `key`, past the padding ffmpeg puts in front of it
+/// (`fps= 85`, `speed=   5x`), or `None` when it prints `N/A`.
+fn number_after(line: &str, key: &str) -> Option<f64> {
+    let rest = line.split_once(key)?.1.trim_start_matches(' ');
+    let end = rest
+        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
 }
 
 /// `Stream #0:2[0x3](und): Subtitle: ...` gives the input index and the kind.
@@ -312,15 +308,30 @@ mod tests {
     }
 
     #[test]
-    fn the_last_stats_line_wins() {
+    fn the_highest_running_average_wins() {
         let stats = parsed(&[
-            STATS,
-            STATS,
+            &format!("{STATS}\r"),
+            &format!("{STATS}\r"),
             "frame=2 fps=30 speed=1.40x bitrate=1006.2kbits/s\r",
+            // The tail of a job whose frame count stopped moving while the
+            // clock kept running, as a throttled or stalled stream does.
+            "frame=2 fps=12 q=-0.0 time=00:00:09.00 bitrate=N/A speed=0.5x\r",
         ]);
         assert_eq!(stats.fps, Some(30.0));
         assert_eq!(stats.speed, Some(1.40));
         assert_eq!(stats.kbps, Some(1006.2));
+    }
+
+    #[test]
+    fn the_padding_ffmpeg_puts_before_a_counter_does_not_hide_it() {
+        let stats = parsed(&[
+            "frame=   43 fps=0.0 q=-0.0 size=N/A time=00:00:00.00 bitrate=N/A speed=   0x\r",
+            "frame= 1491 fps=123 q=-0.0 size=N/A time=00:01:00.39 bitrate=N/A speed=   5x\r",
+            "frame= 1725 fps= 86 q=-0.0 Lsize=N/A time=00:01:10.14 bitrate=N/A speed= 3.5x\r",
+        ]);
+        assert_eq!(stats.fps, Some(123.0));
+        assert_eq!(stats.speed, Some(5.0));
+        assert_eq!(stats.kbps, None);
     }
 
     #[test]

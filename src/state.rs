@@ -42,6 +42,10 @@ const FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 /// `src_hdr` is empty for SDR and names the transfer function otherwise, so a
 /// dashboard can count HDR jobs. Widths are pixels, `speed` is times realtime,
 /// `kbps` is the output bitrate.
+///
+/// `fps` and `speed` are the highest running average the job reached, not its
+/// last line: ffmpeg averages them since the start, so a slow start or a stall
+/// drags the tail down below what the player showed live.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Stats {
     #[serde(default, skip_serializing_if = "Option::is_none")]

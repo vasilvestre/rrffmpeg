@@ -146,8 +146,10 @@ of tmpfs, the dispatch rises by 39 ms.</p>
   <li><b>What the job did, in the journal.</b> Each finished job records the
   fps and speed ffmpeg reported, the source and output codec and size, whether
   the source was HDR, and whether each stream was copied or re-encoded, so a
-  direct stream and a transcode read apart. <code>rrffmpeg-stats</code> prints
-  them as percentiles and tables, and Alloy ships the same lines to Loki.</li>
+  direct stream and a transcode read apart. The fps and speed are the highest
+  average the job reached, so a slow start does not pass for a slow machine.
+  <code>rrffmpeg-stats</code> prints them as percentiles and tables, and Alloy
+  ships the same lines to Loki.</li>
   <li><b>In-process janitor.</b> Retests unhealthy hosts, reaps orphans,
   requeues. No cron watchdog.</li>
   <li><b>Cross-process concurrency cap.</b> One lock file per worker slot,
