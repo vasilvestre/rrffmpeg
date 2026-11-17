@@ -16,9 +16,10 @@ stderr_as_stdout = false
 # only when a host sets agent_addr.
 # agent_cert = "/home/alice/.config/rrffmpeg/worker-cert.pem"
 
-# Journal, pid files and the `coord` slot files. Put it on tmpfs if the disk is
-# slow, the journal is append-only and survives a reboot only for the janitor's
-# benefit.
+# Journal, pid files and the `coord` slot files. Any local filesystem works: on
+# an nvme disk one dispatch costs about 1 ms more than on tmpfs. Keep it off a
+# shared or spinning disk, where one fdatasync can cost tens of milliseconds.
+# The journal survives a reboot only for the janitor's benefit.
 state_dir = "/home/alice/.local/state/rrffmpeg"
 
 # How long one process's "host down" verdict is trusted by the others.

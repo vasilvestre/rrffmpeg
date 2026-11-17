@@ -194,12 +194,14 @@ daemon on the worker.
 | Worker with no inbound reachability | SSH | The agent needs a listening port on the worker |
 | Worker that cannot keep a daemon running | SSH | Nothing to supervise on the worker |
 | Worker that must not run arbitrary argv | SSH | An agent token is remote code execution by design |
-| Any client on a slow or contended disk | SSH or agent, `state_dir` on tmpfs | Every invocation replays the journal before it dispatches |
+| Client on a shared or spinning disk | SSH or agent, `state_dir` on tmpfs | One `fdatasync` on a contended disk can cost tens of milliseconds |
 
 Rules that apply once a worker is configured:
 
-1. Put `state_dir` on tmpfs when the disk is slow. Each job is a new process,
-   so each dispatch reads the journal back. `Evidence` below gives the measure.
+1. Leave `state_dir` on the disk. Any local filesystem works: on an nvme disk a
+   dispatch costs 0.5 to 2.3 ms more than on tmpfs, inside the 50 ms budget.
+   Put it on tmpfs only behind a shared or spinning disk. `docs/latency.md`
+   gives the numbers.
 2. Never let a client without a GPU quietly transcode. After `queue_wait_secs`
    without a worker slot the process runs the local binary, and there is no
    switch to turn that off. Raise `queue_wait_secs`, and watch the log for
@@ -242,10 +244,10 @@ client_weight = 400   # 1 to 1000, same scale as the kernel's IO weight
 - **Do not reinvent the job model.** dffmpeg already solved coordinator +
   worker + heartbeat + requeue. Borrow the model; spend the effort on the
   Rust implementation and the passthrough fidelity.
-- **The journal rotates at 8 MiB but nothing prunes it.** That is fine on a
-  disk and unbounded on tmpfs, which is exactly where a slow disk pushes you.
-  Watch the directory size, or add a retention rule before the client lives on
-  tmpfs for months.
+- **The journal rotates at 8 MiB but nothing prunes it.** A replay at the cap
+  costs about 50 ms whatever the filesystem, which is the whole budget. That,
+  not the disk, is what pushes people to tmpfs. Keep the journal small, or move
+  the replay off the critical path.
 - **A full queue falls back to local execution.** The fallback always runs,
   with no config switch, so a GPU-less client can end up transcoding on the
   wrong hardware. See `Choosing a mode and a transport`.
@@ -257,6 +259,9 @@ Measured on 2026-11-17 on the production pair:
 - Dispatch latency: 2 to 4 seconds with the state DB on a shared spinning disk
   (43% IO pressure); about 64 ms once the DB moved to tmpfs. The difference is
   the fsync on the bookkeeping commit, not SSH.
+- `state_dir` on nvme against tmpfs, development box, loopback: +0.54 ms p50 on
+  a fresh journal and +2.25 ms at the 8 MiB cap. The replay costs about 50 ms
+  on both. See `docs/latency.md`.
 - Encode throughput is GPU-bound and unaffected: 1.54x realtime on 4K HEVC HDR
   with `tonemap_opencl`, 2.67x realtime on 1080p SDR.
 - A `bad`-host incident caused a full outage on a single-GPU-worker setup and
@@ -286,7 +291,7 @@ Every invocation appends to the journal, so the numbers are already on disk.
 
 ```bash
 rrffmpeg-stats                      # state_dir comes from your config
-rrffmpeg-stats --dir /dev/shm/rrffmpeg --json
+rrffmpeg-stats --dir ~/.local/state/rrffmpeg --json
 ```
 
 ```text

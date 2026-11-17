@@ -264,8 +264,67 @@ At the cap a replay costs 34.732 ms median, and it sits on the critical path,
 between deciding to run and running ffmpeg. That is most of the 50 ms budget for
 bookkeeping alone. The five runs fall as the page cache warms, from 36.820 ms
 to 33.821 ms, and settle at 0.420 us per record. The fix is the one ADR 0002
-describes: keep the replay off the critical path. Until then, keep `state_dir`
-on tmpfs and keep the journal small.
+describes: keep the replay off the critical path. Until then, keep the journal
+small: the cap costs about 50 ms per dispatch on any filesystem, which is the
+whole budget.
+
+## State directory: disk against tmpfs
+
+The advice used to be "put `state_dir` on tmpfs". The measure says it is not
+needed. The journal append is async: the flusher writes and syncs at most every
+500 ms, and once more when the process exits. Same box, loopback, agent
+transport, release binaries, load 1.30 to 1.68 on 16 threads.
+
+Dispatcher only, `ffmpeg_bin = "/bin/true"` on the worker, fresh journal, n=200:
+
+```text
+nvme     p50=   2.34 ms  p95=   2.71 ms  p99=   3.75 ms  max=  11.67 ms
+tmpfs    p50=   1.80 ms  p95=   1.91 ms  p99=   1.97 ms  max=   2.51 ms
+```
+
+Real ffmpeg, `ffmpeg -version` through the agent, n=60:
+
+```text
+plain ffmpeg -version        p50=  26.37 ms  p95=  29.99 ms  p99=  38.58 ms
+nvme  state_dir              p50=  28.84 ms  p95=  29.93 ms  p99=  31.37 ms
+tmpfs state_dir              p50=  27.72 ms  p95=  29.35 ms  p99=  30.55 ms
+```
+
+The same two runs with the journal filled to the 8 MiB rotation cap, 85 070
+records, dispatcher only, n=40:
+
+```text
+nvme     p50=  53.87 ms  p95=  60.76 ms  p99=  77.12 ms
+tmpfs    p50=  51.62 ms  p95=  56.40 ms  p99=  61.99 ms
+```
+
+The two raw costs behind those rows, measured alone:
+
+```text
+append 100 B and fdatasync, n=200
+nvme     p50=   0.420 ms  p99=   0.811 ms  max=   5.575 ms
+tmpfs    p50=   0.001 ms  p99=   0.001 ms  max=   0.009 ms
+
+read the 8 MiB journal with O_DIRECT, page cache cold
+nvme     8.2 ms
+tmpfs    2.2 ms
+```
+
+Read it as: the filesystem costs 0.54 ms p50 on a fresh journal and 2.25 ms at
+the cap. The replay costs about 50 ms on both. So the disk is not what the
+budget is spent on, and tmpfs does not buy back the replay.
+
+Two limits stay. A shared or spinning disk is not in these rows: one
+`fdatasync` there costs tens of milliseconds, and that is the case where tmpfs
+still pays. If the kernel evicts the 8 MiB between two dispatches, a cold read
+adds 8 ms on nvme.
+
+To repeat: point two configs at an nvme directory and at `/dev/shm`, run
+`rrffmpeg-agent` on `127.0.0.1:9876`, and time a few hundred
+`rrffmpeg -version` calls with `$EPOCHREALTIME` around each one. Set
+`ffmpeg_bin = "/bin/true"` in `[[hosts]]` to keep the codec work out, and leave
+it out for the real ffmpeg rows.
+
 
 ## Resources per job
 
