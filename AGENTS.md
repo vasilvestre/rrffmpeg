@@ -22,7 +22,9 @@ A `v*` tag runs `.github/workflows/release.yml`, which publishes static
 in `README.md`.
 
 The public page is `docs/index.html`, served by GitHub Pages from the `/docs`
-folder of `main`. Keep it true to the code: config keys, features and status.
+folder of `main`. Treat it like the decision records: a change that adds or
+alters a config key, a feature or the project status updates the page in the
+same change. Keep its install commands and its status section true to the code.
 
 Layout: `src/main.rs` wires the dispatch, `config.rs` reads TOML, `paths.rs`
 maps client to worker roots, `transport.rs` picks SSH or the agent per host,
