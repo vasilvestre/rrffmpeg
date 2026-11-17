@@ -37,6 +37,9 @@ pub enum Error {
     Config(String),
     State(String),
     Transport(String),
+    /// The worker never started the job. The only error a retry on another
+    /// host can take without risking duplicated output.
+    NotStarted(String),
 }
 
 impl fmt::Display for Error {
@@ -46,6 +49,7 @@ impl fmt::Display for Error {
             Error::Config(m) => write!(f, "rrffmpeg: config: {m}"),
             Error::State(m) => write!(f, "rrffmpeg: state: {m}"),
             Error::Transport(m) => write!(f, "rrffmpeg: transport: {m}"),
+            Error::NotStarted(m) => write!(f, "rrffmpeg: not started: {m}"),
         }
     }
 }

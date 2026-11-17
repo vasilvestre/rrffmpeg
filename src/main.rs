@@ -82,51 +82,106 @@ fn run() -> Result<i32> {
     };
 
     let wait = Duration::from_secs(config.queue_wait_secs);
-    let lease = match scheduler.acquire_blocking(&job, wait) {
-        Some(lease) => lease,
-        None => {
+    match dispatch(
+        &scheduler,
+        &journal,
+        transport.as_ref(),
+        &job,
+        start,
+        wait,
+        stderr_as_stdout,
+    ) {
+        Dispatch::Ran(code) => Ok(code),
+        Dispatch::NoSlot => {
             eprintln!(
                 "rrffmpeg: no worker slot after {}s, running locally",
                 config.queue_wait_secs
             );
-            return run_local(&config, program, &args, stderr_as_stdout);
+            run_local(&config, program, &args, stderr_as_stdout)
         }
-    };
+        Dispatch::Failed(e) => Err(e),
+    }
+}
 
-    let mapped = Job {
-        args: args
-            .iter()
-            .map(|a| paths::to_worker(&lease.host, a))
-            .collect(),
-        ..job.clone()
-    };
+/// What became of one job, for the caller that owns the local fallback.
+enum Dispatch {
+    Ran(i32),
+    Failed(Error),
+    NoSlot,
+}
 
-    // Queued, not fsync'd: the transcode starts without waiting for the disk.
-    journal.append(Event::Started {
-        job: job.id.clone(),
-        host: lease.host.name.clone(),
-        elapsed_us: start.elapsed().as_micros() as u64,
-    });
+/// Place the job, run it, record it.
+///
+/// A dispatch that fails before the worker starts ffmpeg cost nothing and left
+/// no output behind, so it is retried once on another host: one flaky link
+/// must not become an outage. Only the agent can prove that boundary, through
+/// its `ready` frame, so only it returns `Error::NotStarted`.
+fn dispatch(
+    scheduler: &Scheduler,
+    journal: &Journal,
+    transport: &dyn Transport,
+    job: &Job,
+    start: std::time::Instant,
+    wait: Duration,
+    stderr_as_stdout: bool,
+) -> Dispatch {
+    let can_retry = scheduler.hosts().len() > 1;
+    let mut attempt = job.clone();
+    let mut failed: Option<Error> = None;
+    loop {
+        let lease = match scheduler.acquire_blocking(&attempt, wait) {
+            Some(lease) => lease,
+            // A failed attempt that cannot be retried keeps its own error.
+            // Falling back to local here would hide a worker that answered.
+            None => return failed.map_or(Dispatch::NoSlot, Dispatch::Failed),
+        };
 
-    let code = match transport.run(&lease.host, &mapped, stderr_as_stdout) {
-        Ok(code) => code,
-        Err(e) => {
-            journal.append(Event::HostDown {
-                host: lease.host.name.clone(),
-            });
-            scheduler.mark_down(&lease.host.name);
-            drop(lease);
-            return Err(e);
+        let mapped = Job {
+            args: attempt
+                .args
+                .iter()
+                .map(|a| paths::to_worker(&lease.host, a))
+                .collect(),
+            ..attempt.clone()
+        };
+
+        // Queued, not fsync'd: the transcode starts without waiting for the disk.
+        journal.append(Event::Started {
+            job: mapped.id.clone(),
+            host: lease.host.name.clone(),
+            elapsed_us: start.elapsed().as_micros() as u64,
+        });
+
+        match transport.run(&lease.host, &mapped, stderr_as_stdout) {
+            Ok(code) => {
+                journal.append(Event::Finished {
+                    job: mapped.id.clone(),
+                    code,
+                });
+                // Free the slot before returning so the next job can start at once.
+                drop(lease);
+                return Dispatch::Ran(code);
+            }
+            Err(e) => {
+                journal.append(Event::HostDown {
+                    host: lease.host.name.clone(),
+                });
+                scheduler.mark_down(&lease.host.name);
+                drop(lease);
+                if can_retry && failed.is_none() && matches!(e, Error::NotStarted(_)) {
+                    failed = Some(e);
+                    // A fresh id keeps one journal row per attempt, so the
+                    // counters and `rrffmpeg-stats` see two jobs, not one.
+                    attempt = Job {
+                        id: job_id(),
+                        ..job.clone()
+                    };
+                    continue;
+                }
+                return Dispatch::Failed(e);
+            }
         }
-    };
-
-    journal.append(Event::Finished {
-        job: job.id.clone(),
-        code,
-    });
-    // Free the slot before returning so the next job can start at once.
-    drop(lease);
-    Ok(code)
+    }
 }
 
 fn run_local(
@@ -291,5 +346,92 @@ mod tests {
             None
         );
         assert_eq!(required_capability(&args(&["-c", "copy"])), None);
+    }
+
+    /// Fails the first dispatch only, then succeeds: the shape of a lost
+    /// handshake on one worker while another is healthy.
+    struct Flaky {
+        calls: std::sync::Mutex<Vec<String>>,
+        failed_once: std::sync::Mutex<bool>,
+    }
+
+    impl Transport for Flaky {
+        fn run(&self, host: &rrffmpeg::Host, _job: &Job, _stderr_as_stdout: bool) -> Result<i32> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(host.name.clone());
+            let mut failed = self.failed_once.lock().unwrap_or_else(|e| e.into_inner());
+            if *failed {
+                return Ok(0);
+            }
+            *failed = true;
+            Err(Error::NotStarted("no ready frame".into()))
+        }
+
+        fn probe(&self, _host: &rrffmpeg::Host) -> bool {
+            true
+        }
+
+        fn job_alive(&self, _host: &rrffmpeg::Host, _job: &str) -> bool {
+            false
+        }
+    }
+
+    fn host(name: &str) -> rrffmpeg::Host {
+        rrffmpeg::Host {
+            name: name.into(),
+            concurrency: 1,
+            capabilities: Vec::new(),
+            ffmpeg_bin: None,
+            ffprobe_bin: None,
+            agent_addr: None,
+            paths: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_job_that_never_started_moves_to_another_host() {
+        let dir = std::env::temp_dir().join(format!("rrffmpeg-retry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("state dir");
+        let scheduler = Scheduler::new(
+            vec![host("a"), host("b")],
+            Arc::new(LockDir::new(&dir)),
+            Duration::from_secs(60),
+        );
+        let journal = Journal::open(&dir).expect("journal");
+        let flaky = Flaky {
+            calls: std::sync::Mutex::new(Vec::new()),
+            failed_once: std::sync::Mutex::new(false),
+        };
+        let job = Job {
+            id: "retry-1".into(),
+            program: Program::Ffmpeg,
+            args: args(&["-i", "file:/m/x.mkv"]),
+            priority: 0,
+            capability: None,
+        };
+
+        let got = dispatch(
+            &scheduler,
+            &journal,
+            &flaky,
+            &job,
+            std::time::Instant::now(),
+            Duration::from_secs(5),
+            false,
+        );
+
+        assert!(matches!(got, Dispatch::Ran(0)));
+        let calls = flaky.calls.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(calls.len(), 2, "one retry, not a loop");
+        assert_ne!(calls[0], calls[1], "the retry must leave the failed host");
+        assert!(
+            scheduler.is_down(&calls[0]),
+            "the failed host is marked down"
+        );
+        drop(calls);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

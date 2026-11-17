@@ -114,8 +114,9 @@ Ship the smallest thing that is strictly better than rffmpeg. State today:
 - [x] One worker over SSH, with path mapping in both directions.
 - [x] Agent transport: `rrffmpeg-agent` on the worker, two TLS connections per
   job. `agent_addr` on a host selects it, else SSH. ADR 0009 and ADR 0010.
-- [x] Async WAL bookkeeping plus a janitor (re-test, reap). Requeue waits for
-  the agent transport: a dead client has nobody left to retry.
+- [x] Async WAL bookkeeping plus a janitor (re-test, reap). A job that never
+  started on a worker is retried once on another. A job whose client died
+  still ends there: nobody is left to read its output. ADR 0013.
 - [x] Per-host concurrency cap and capability matching. The cap holds across
   processes with `flock` slot files under `state_dir/coord/`, and the
   host-down verdict is shared with an expiry.

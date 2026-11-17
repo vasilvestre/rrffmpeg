@@ -295,8 +295,9 @@ to = "/home/bob/transcode"</code></pre>
 over SSH, an agent transport, path mapping both ways, journal plus janitor,
 per-host cap, capability match, priority and per-client weight across
 processes, and a replay test driven by invocations recorded from a real
-Jellyfin server. Not yet: requeue after a dead client (the agent kills the
-orphan instead).</p>
+Jellyfin server. A job that fails before the worker starts ffmpeg is retried
+once on another host (ADR 0013). A job whose client dies is not replayed:
+nobody is left to read its output.</p>
 
 <p>Design choices and their costs are written down in the
 <a href="adr/">decision records</a>.</p>

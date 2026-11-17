@@ -91,6 +91,15 @@ fn io_err(e: io::Error, what: &str) -> Error {
     Error::Io(e, what.to_string())
 }
 
+/// Reclassify a transport failure that happened before the daemon started the
+/// process, so the caller may retry it elsewhere.
+fn not_started(e: Error) -> Error {
+    match e {
+        Error::Transport(m) => Error::NotStarted(m),
+        other => other,
+    }
+}
+
 /// The lock cannot be held across a panic in this module, so a poisoned lock
 /// still holds usable data. Never unwrap on a path a request can reach.
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -495,7 +504,12 @@ impl Agent {
             args,
             paths: Vec::new(),
         };
-        let mut ctl = self.hello(host, &hello, Some(self.timeout))?;
+        // `ready` is the line between "the daemon ran it" and "it never
+        // started". Before it, nothing was written anywhere, so a retry on
+        // another host cannot duplicate output.
+        let mut ctl = self
+            .hello(host, &hello, Some(self.timeout))
+            .map_err(not_started)?;
         let mut framer = Framer::default();
         match recv(&mut ctl, &mut framer, Some(Instant::now() + self.timeout)) {
             Ok((READY, _)) => {}
@@ -510,7 +524,7 @@ impl Agent {
                 )));
             }
             Err(e) => {
-                return Err(Error::Transport(format!(
+                return Err(Error::NotStarted(format!(
                     "agent {} did not start job {}: {e}",
                     host.name, job.id
                 )));
