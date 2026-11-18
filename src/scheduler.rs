@@ -438,9 +438,7 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
         let probe = {
             let scheduler = Arc::clone(&scheduler);
-            thread::spawn(move || {
-                scheduler.acquire_blocking(&job(-5, &[]), Duration::from_secs(5))
-            })
+            thread::spawn(move || scheduler.acquire_blocking(&job(-5, &[]), Duration::from_secs(5)))
         };
         thread::sleep(Duration::from_millis(200));
         drop(held);

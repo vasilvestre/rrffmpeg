@@ -41,15 +41,21 @@ pub fn script(ffmpeg: &str) -> String {
         ),
         (
             "vaapi_hevc",
-            format!("{run} {dev} {src} -vf format=nv12,hwupload -c:v hevc_vaapi -profile:v main {null}"),
+            format!(
+                "{run} {dev} {src} -vf format=nv12,hwupload -c:v hevc_vaapi -profile:v main {null}"
+            ),
         ),
         (
             "vaapi_hevc10",
-            format!("{run} {dev} {src} -vf format=p010,hwupload -c:v hevc_vaapi -profile:v main10 {null}"),
+            format!(
+                "{run} {dev} {src} -vf format=p010,hwupload -c:v hevc_vaapi -profile:v main10 {null}"
+            ),
         ),
         (
             "vaapi_vpp",
-            format!("{run} {dev} {src} -vf format=nv12,hwupload,scale_vaapi=w=160:h=90 -c:v h264_vaapi {null}"),
+            format!(
+                "{run} {dev} {src} -vf format=nv12,hwupload,scale_vaapi=w=160:h=90 -c:v h264_vaapi {null}"
+            ),
         ),
         ("qsv", format!("{run} {src} -c:v h264_qsv {null}")),
         ("nvenc", format!("{run} {src} -c:v h264_nvenc {null}")),
@@ -136,11 +142,21 @@ mod tests {
             vec!["vaapi", "vaapi_hevc10"]
         );
         assert_eq!(
-            required(&args(&["-vf", "format=p010,hwupload", "-c:v", "hevc_vaapi"])),
+            required(&args(&[
+                "-vf",
+                "format=p010,hwupload",
+                "-c:v",
+                "hevc_vaapi"
+            ])),
             vec!["vaapi", "vaapi_hevc10"]
         );
         assert_eq!(
-            required(&args(&["-vf", "tonemap_vaapi=format=nv12", "-c:v", "h264_vaapi"])),
+            required(&args(&[
+                "-vf",
+                "tonemap_vaapi=format=nv12",
+                "-c:v",
+                "h264_vaapi"
+            ])),
             vec!["vaapi", "vaapi_tonemap"]
         );
         // A ten-bit hint on a non-vaapi encoder adds nothing.
