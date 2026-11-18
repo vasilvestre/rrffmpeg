@@ -2,6 +2,9 @@
 
 Status: Accepted
 Date: 2026-11-18
+Note: replay still moved the writer, so 0.8.1 did not fully deliver this.
+[ADR 0026](0026-a-block-is-exclusive-and-replay-never-moves-the-writer.md)
+completes it.
 
 ## Context
 

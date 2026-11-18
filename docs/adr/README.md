@@ -35,5 +35,6 @@ ADR-NNNN` and add the new record.
 | [0023](0023-the-sample-is-a-peak-not-a-tail.md) | The recorded fps and speed are the highest running average, not the last line | Accepted |
 | [0024](0024-declared-capabilities.md) | Capabilities are declared per host, with one token per real driver limit | Accepted |
 | [0025](0025-sequence-numbers-are-reserved-per-process.md) | Sequence numbers are reserved per process, under a lock at open | Accepted |
+| [0026](0026-a-block-is-exclusive-and-replay-never-moves-the-writer.md) | A journal block is exclusive, and replay never moves the writer | Accepted |
 
 All records dated 2026-11-17.

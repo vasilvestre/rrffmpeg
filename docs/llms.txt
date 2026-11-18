@@ -15,6 +15,7 @@ Each entry points at raw Markdown so a reader gets plain text.
 - [Measurer](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/scripts/measure.py): 5 warmup runs, N samples, nearest-rank percentiles, used by both benchmark pages.
 - [Replay harness](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/replay.md): records real Jellyfin invocations and replays them through `rrffmpeg` to catch argument, quoting, stream wiring and exit code regressions.
 - [Example config](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/config.example.toml): a working pair of client and worker hosts.
+- [Release 0.8.2](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/releases/0.8.2.md): replay no longer moves a writer into another process's block, and a full block is renewed, so journal `seq` values stay unique.
 - [Release 0.8.1](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/releases/0.8.1.md): journal sequence numbers are reserved per process, so `rrffmpeg-stats` stops reporting phantom open jobs, and orphan events are counted.
 - [Release 0.8.0](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/releases/0.8.0.md): capabilities are sub-tokens proved by one frame per encoder, and `rrffmpeg capabilities` prints the config rows.
 - [Install script](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/scripts/install.sh): downloads the latest release, checks the checksum, installs the binaries and the `ffmpeg` links, and keeps the previous binary for a rollback.
@@ -46,6 +47,7 @@ Each entry points at raw Markdown so a reader gets plain text.
 
 - [0024 Declared capabilities](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0024-declared-capabilities.md): one token per real driver limit, why libva and ffmpeg cannot answer it, and the one-frame probe that prints the config rows.
 - [0025 Reserved sequence numbers](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0025-sequence-numbers-are-reserved-per-process.md): why concurrent processes shared a journal `seq`, and why a block reservation at open fixes identity without touching the record format.
+- [0026 Exclusive blocks](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0026-a-block-is-exclusive-and-replay-never-moves-the-writer.md): why replaying the journal must not move the writer, and how a full block is renewed.
 
 ## Optional
 
