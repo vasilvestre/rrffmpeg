@@ -163,10 +163,10 @@ struct Live {
     /// scans the map.
     counts: HashMap<String, usize>,
     down: HashSet<String>,
-    /// Last sequence number assigned or replayed.
+    /// Last sequence number assigned by this process.
     seq: u64,
-    /// Highest sequence number replayed, used to ignore duplicates.
-    last_seq: u64,
+    /// First number of the next block, exclusive of the current one.
+    block_end: u64,
     /// The journal has been replayed into this state. Only `append` runs before
     /// the janitor asks for the active jobs, and that read is what replays.
     replayed: bool,
@@ -198,8 +198,10 @@ impl Journal {
         // dispatch budget on state the janitor needs and the dispatch does not.
         // Reserve once per process: a per-append lock would put a cross-process
         // syscall on the dispatch path.
+        let base = reserve_seq(dir, &path, &rotated)?;
         let live = Live {
-            seq: reserve_seq(dir, &path, &rotated)?,
+            seq: base,
+            block_end: base + SEQ_BLOCK,
             ..Live::default()
         };
 
@@ -250,12 +252,16 @@ impl Journal {
             return;
         };
         rotated.sort_by_key(|(n, _)| *n);
+        // Blocks are exclusive per process, so file order is not seq order.
+        // A set keeps the first copy of a 0.8.0-era duplicate without dropping
+        // records from a lower block that were written later.
+        let mut seen = HashSet::new();
         for (_, path) in &rotated {
-            if replay(path, &mut live).is_err() {
+            if replay(path, &mut live, &mut seen).is_err() {
                 return;
             }
         }
-        if replay(&self.dir.join(JOURNAL_NAME), &mut live).is_err() {
+        if replay(&self.dir.join(JOURNAL_NAME), &mut live, &mut seen).is_err() {
             return;
         }
         live.replayed = true;
@@ -267,6 +273,16 @@ impl Journal {
     pub fn append(&self, event: Event) {
         let record = {
             let mut live = lock(&self.live);
+            // A block lasts 1024 appends; a long-lived process takes the next
+            // one here, so it cannot run into another process's block.
+            if live.seq >= live.block_end {
+                let rotated = rotated_files(&self.dir).unwrap_or_default();
+                let active = self.dir.join(JOURNAL_NAME);
+                if let Ok(base) = reserve_seq(&self.dir, &active, &rotated) {
+                    live.seq = live.seq.max(base);
+                    live.block_end = live.seq + SEQ_BLOCK;
+                }
+            }
             live.seq += 1;
             apply(&event, &mut live);
             Record {
@@ -495,7 +511,7 @@ fn tail_seq(path: &Path) -> u64 {
 
 /// Rebuild live state from one file. A bad line is reported and skipped: a
 /// truncated tail after a crash is expected, not fatal.
-fn replay(path: &Path, live: &mut Live) -> Result<()> {
+fn replay(path: &Path, live: &mut Live, seen: &mut HashSet<u64>) -> Result<()> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -512,11 +528,9 @@ fn replay(path: &Path, live: &mut Live) -> Result<()> {
         };
         match serde_json::from_str::<Record>(&line) {
             Ok(record) => {
-                if record.seq <= live.last_seq {
+                if !seen.insert(record.seq) {
                     continue;
                 }
-                live.last_seq = record.seq;
-                live.seq = live.seq.max(record.seq);
                 apply(&record.ev, live);
             }
             Err(e) => eprintln!(
@@ -703,6 +717,16 @@ mod tests {
             program: "ffmpeg".into(),
             in_flight: 1,
         }
+    }
+
+    /// Sequence numbers as written, not as `records()` dedups them: a duplicate
+    /// is the defect these tests must see.
+    fn raw_seqs(path: &Path) -> Vec<u64> {
+        let file = File::open(path).unwrap();
+        BufReader::new(file)
+            .lines()
+            .map(|line| serde_json::from_str::<Record>(&line.unwrap()).unwrap().seq)
+            .collect()
     }
 
     fn records(path: &Path) -> Vec<Record> {
@@ -924,7 +948,8 @@ mod tests {
 
         let lines = records(&dir.join(JOURNAL_NAME));
         assert_eq!(lines.len(), WRITERS * PER_WRITER);
-        let mut seqs: Vec<u64> = lines.iter().map(|r| r.seq).collect();
+        let mut seqs = raw_seqs(&dir.join(JOURNAL_NAME));
+        assert_eq!(seqs.len(), WRITERS * PER_WRITER);
         seqs.sort_unstable();
         seqs.dedup();
         assert_eq!(
@@ -932,6 +957,65 @@ mod tests {
             WRITERS * PER_WRITER,
             "two processes took the same sequence number"
         );
+    }
+
+    /// Reading the journal for the janitor must not move this process past its
+    /// reserved block. Two handles that both replay used to append the same
+    /// number, which is how 0.8.1 still lost records.
+    #[test]
+    fn replay_does_not_move_the_writer_past_its_block() {
+        let dir = temp_dir("replay-block");
+        let first = Journal::open(&dir).unwrap();
+        let second = Journal::open(&dir).unwrap();
+        let third = Journal::open(&dir).unwrap();
+
+        // Write past the second and third blocks, so their replay would land on
+        // the same high number without a per-process block.
+        for i in 0..SEQ_BLOCK * 2 + 2 {
+            first.append(started(&format!("a-{i}"), "worker"));
+        }
+        first.flush().unwrap();
+
+        // Both replay the same high tail, as the janitor does in every process.
+        let _ = second.active_on("worker");
+        let _ = third.active_on("worker");
+        second.append(started("b", "worker"));
+        third.append(started("c", "worker"));
+        second.flush().unwrap();
+        third.flush().unwrap();
+
+        let lines = records(&dir.join(JOURNAL_NAME));
+        let total = lines.len();
+        let mut seqs = raw_seqs(&dir.join(JOURNAL_NAME));
+        assert_eq!(seqs.len(), total);
+        seqs.sort_unstable();
+        seqs.dedup();
+        assert_eq!(
+            seqs.len(),
+            total,
+            "replay moved a writer into another block"
+        );
+    }
+
+    /// A process that outlives its first 1024 numbers takes a new block instead
+    /// of running into the next process's.
+    #[test]
+    fn a_long_lived_process_takes_a_new_block() {
+        let dir = temp_dir("block-renewal");
+        let journal = Journal::open(&dir).unwrap();
+        let n = (SEQ_BLOCK * 2 + 10) as usize;
+        for i in 0..n {
+            journal.append(started(&format!("j{i}"), "worker"));
+        }
+        journal.flush().unwrap();
+
+        let lines = records(&dir.join(JOURNAL_NAME));
+        assert_eq!(lines.len(), n);
+        let mut seqs = raw_seqs(&dir.join(JOURNAL_NAME));
+        assert_eq!(seqs.len(), n);
+        seqs.sort_unstable();
+        seqs.dedup();
+        assert_eq!(seqs.len(), n, "a block overflow was not renewed");
     }
 
     #[test]
