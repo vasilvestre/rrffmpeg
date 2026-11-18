@@ -64,7 +64,11 @@ pub struct Summary {
     pub codes: BTreeMap<i32, usize>,
     pub jobs: Vec<Job>,
     pub open: usize,
+    /// Reap events that matched a start.
     pub reaped: usize,
+    /// Events whose start line is missing, so they cannot be attached to a job.
+    pub orphan_finish: usize,
+    pub orphan_reaped: usize,
 }
 
 impl Summary {
@@ -108,6 +112,7 @@ impl Summary {
                     job, code, stats, ..
                 } => {
                     let Some(&slot) = index.get(job) else {
+                        summary.orphan_finish += 1;
                         continue;
                     };
                     let started = summary.jobs[slot].started_ts;
@@ -122,9 +127,11 @@ impl Summary {
                     *summary.codes.entry(*code).or_insert(0) += 1;
                 }
                 Event::Reaped { job } => {
-                    summary.reaped += 1;
                     if let Some(&slot) = index.get(job) {
+                        summary.reaped += 1;
                         summary.jobs[slot].reaped = true;
+                    } else {
+                        summary.orphan_reaped += 1;
                     }
                 }
                 Event::HostDown { host } => {
@@ -179,11 +186,13 @@ impl Summary {
     pub fn report(&self) -> String {
         let mut out = format!("journal {}\n", self.path);
         out.push_str(&format!(
-            "records {}  jobs {}  open {}  reaped {}\n",
+            "records {}  jobs {}  open {}  reaped {}  orphan_finish {}  orphan_reaped {}\n",
             self.records,
             self.jobs.len(),
             self.open,
-            self.reaped
+            self.reaped,
+            self.orphan_finish,
+            self.orphan_reaped,
         ));
         out.push_str(&self.line("dispatch", &self.dispatch_us));
         out.push_str(&self.line("duration", &self.duration_us));
@@ -257,6 +266,8 @@ impl Summary {
             "jobs": self.jobs.len(),
             "open": self.open,
             "reaped": self.reaped,
+            "orphan_finish": self.orphan_finish,
+            "orphan_reaped": self.orphan_reaped,
             "dispatch_us": stats(&self.dispatch_us),
             "duration_us": stats(&self.duration_us),
             "speed_x1000": stats(&self.speed),
@@ -394,6 +405,45 @@ mod tests {
         let summary = Summary::from_records("journal".into(), &records);
         assert_eq!(summary.hosts["worker"].failed, 1);
         assert!(summary.json().contains("\"p99\":500"), "{}", summary.json());
+    }
+
+    #[test]
+    fn a_finished_without_a_started_is_counted_as_an_orphan() {
+        let records = vec![
+            record(1, 0, started("a", "worker", 100)),
+            record(2, 10, finished("ghost", 0)),
+            record(3, 20, finished("a", 0)),
+        ];
+        let summary = Summary::from_records("journal".into(), &records);
+        assert_eq!(summary.orphan_finish, 1);
+        assert_eq!(summary.jobs.len(), 1);
+        assert_eq!(summary.open, 0);
+        assert!(
+            summary.report().contains("orphan_finish 1"),
+            "{}",
+            summary.report()
+        );
+        assert!(summary.json().contains("\"orphan_finish\":1"));
+    }
+
+    #[test]
+    fn a_reaped_without_a_started_is_counted_as_an_orphan() {
+        let records = vec![
+            record(1, 0, started("a", "worker", 100)),
+            record(
+                2,
+                10,
+                Event::Reaped {
+                    job: "ghost".into(),
+                },
+            ),
+            record(3, 20, Event::Reaped { job: "a".into() }),
+        ];
+        let summary = Summary::from_records("journal".into(), &records);
+        assert_eq!(summary.orphan_reaped, 1);
+        assert_eq!(summary.reaped, 1);
+        assert_eq!(summary.open, 0);
+        assert!(summary.report().contains("orphan_reaped 1"));
     }
 
     fn record(seq: u64, ts: u64, ev: Event) -> crate::state::Record {

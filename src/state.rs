@@ -28,6 +28,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const JOURNAL_NAME: &str = "journal";
+/// Holds the highest sequence number reserved, so processes never overlap.
+const SEQ_NAME: &str = "journal.seq";
+/// Numbers one process may use before it needs another block. A job writes a
+/// start, a finish and the odd host or reap event, well inside this.
+const SEQ_BLOCK: u64 = 1024;
 /// Rotate once the active file passes this size. Old files stay as
 /// `journal.1`, `journal.2`, and so on.
 const ROTATE_BYTES: u64 = 8 * 1024 * 1024;
@@ -191,8 +196,10 @@ impl Journal {
         // Only the tail is read here. Replaying the whole file costs about
         // 4 us/KB, so at the 8 MB rotation cap it would spend 30 ms of the
         // dispatch budget on state the janitor needs and the dispatch does not.
+        // Reserve once per process: a per-append lock would put a cross-process
+        // syscall on the dispatch path.
         let live = Live {
-            seq: last_seq_on_disk(&path, &rotated),
+            seq: reserve_seq(dir, &path, &rotated)?,
             ..Live::default()
         };
 
@@ -357,9 +364,9 @@ fn dec(counts: &mut HashMap<String, usize>, host: &str) {
     }
 }
 
-/// Every record on disk, oldest first, one entry per `seq`. Rotation writes
-/// `journal.N` beside the active `journal`, and a crash can repeat a sequence
-/// number, so the map wins twice.
+/// Every record on disk, oldest first, one entry per `seq`. Since ADR 0025
+/// sequence numbers are unique, so the map only collapses a journal written by
+/// 0.8.0 or earlier, where several processes could take the same number.
 pub fn records(dir: &Path) -> Result<Vec<Record>> {
     let mut files = vec![dir.join(JOURNAL_NAME)];
     files.extend(rotated_files(dir)?.into_iter().map(|(_, path)| path));
@@ -403,21 +410,59 @@ fn rotated_files(dir: &Path) -> Result<Vec<(u64, PathBuf)>> {
     Ok(out)
 }
 
-/// Rebuild live state from one file. A bad line is reported and skipped: a
-/// truncated tail after a crash is expected, not fatal.
-/// Highest `seq` already on disk, from the tail of the active file, or of the
-/// newest rotated one when the active file holds no record yet.
-fn last_seq_on_disk(active: &Path, rotated: &[(u64, PathBuf)]) -> u64 {
-    let seq = tail_seq(active);
-    if seq > 0 {
-        return seq;
+/// Take the next block of sequence numbers under an exclusive lock on the
+/// reservation file. Returns the last number in use, so the first append takes
+/// the next one. Every failure falls back to the journal tail: a broken state
+/// directory must not stop a transcode.
+fn reserve_seq(dir: &Path, active: &Path, rotated: &[(u64, PathBuf)]) -> Result<u64> {
+    let disk = std::iter::once(active)
+        .chain(rotated.iter().map(|(_, path)| path.as_path()))
+        .map(tail_seq)
+        .max()
+        .unwrap_or(0);
+    let path = dir.join(SEQ_NAME);
+    let mut file = match OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!(
+                "rrffmpeg: journal {}: {e}, sequence numbers may collide",
+                path.display()
+            );
+            return Ok(disk);
+        }
+    };
+    if let Err(e) = file.lock() {
+        eprintln!(
+            "rrffmpeg: journal {}: {e}, sequence numbers may collide",
+            path.display()
+        );
+        return Ok(disk);
     }
-    rotated
-        .iter()
-        .rev()
-        .map(|(_, path)| tail_seq(path))
-        .find(|seq| *seq > 0)
-        .unwrap_or(0)
+
+    let mut text = String::new();
+    let _ = file.read_to_string(&mut text);
+    let base = text.trim().parse::<u64>().unwrap_or(0).max(disk);
+    // No fsync: another process on this host reads the page cache, and a crash
+    // loses only the unused tail of the block.
+    let next = base + SEQ_BLOCK;
+    let write = (|| -> io::Result<()> {
+        file.set_len(0)?;
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(next.to_string().as_bytes())
+    })();
+    if let Err(e) = write {
+        eprintln!(
+            "rrffmpeg: journal {}: {e}, sequence numbers may collide",
+            path.display()
+        );
+    }
+    Ok(base)
 }
 
 /// The last complete record of one file, so a restart resumes the sequence
@@ -448,6 +493,8 @@ fn tail_seq(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// Rebuild live state from one file. A bad line is reported and skipped: a
+/// truncated tail after a crash is expected, not fatal.
 fn replay(path: &Path, live: &mut Live) -> Result<()> {
     let file = match File::open(path) {
         Ok(file) => file,
@@ -635,8 +682,8 @@ fn flusher_loop(mut writer: Writer, rx: Receiver<Command>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Barrier};
 
     fn temp_dir(name: &str) -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -848,6 +895,43 @@ mod tests {
         seqs.sort_unstable();
         seqs.dedup();
         assert_eq!(seqs.len(), 4000, "sequence numbers must be unique");
+    }
+
+    /// Jellyfin starts one process per job, so each handle opens the same
+    /// directory and must take numbers no other process will use.
+    #[test]
+    fn separate_handles_never_share_a_sequence_number() {
+        let dir = temp_dir("cross-process-seq");
+        const WRITERS: usize = 8;
+        const PER_WRITER: usize = 50;
+        let barrier = Arc::new(Barrier::new(WRITERS));
+        let mut handles = Vec::new();
+        for t in 0..WRITERS {
+            let dir = dir.clone();
+            let barrier = barrier.clone();
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                let journal = Journal::open(&dir).unwrap();
+                for i in 0..PER_WRITER {
+                    journal.append(started(&format!("job-{t}-{i}"), "worker"));
+                }
+                journal.flush().unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let lines = records(&dir.join(JOURNAL_NAME));
+        assert_eq!(lines.len(), WRITERS * PER_WRITER);
+        let mut seqs: Vec<u64> = lines.iter().map(|r| r.seq).collect();
+        seqs.sort_unstable();
+        seqs.dedup();
+        assert_eq!(
+            seqs.len(),
+            WRITERS * PER_WRITER,
+            "two processes took the same sequence number"
+        );
     }
 
     #[test]

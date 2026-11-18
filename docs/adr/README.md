@@ -34,5 +34,6 @@ ADR-NNNN` and add the new record.
 | [0022](0022-progress-sample-in-the-journal.md) | The journal records fps, speed, content and copy-or-encode per stream | Accepted |
 | [0023](0023-the-sample-is-a-peak-not-a-tail.md) | The recorded fps and speed are the highest running average, not the last line | Accepted |
 | [0024](0024-declared-capabilities.md) | Capabilities are declared per host, with one token per real driver limit | Accepted |
+| [0025](0025-sequence-numbers-are-reserved-per-process.md) | Sequence numbers are reserved per process, under a lock at open | Accepted |
 
 All records dated 2026-11-17.
