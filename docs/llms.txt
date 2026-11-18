@@ -15,7 +15,7 @@ Each entry points at raw Markdown so a reader gets plain text.
 - [Measurer](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/scripts/measure.py): 5 warmup runs, N samples, nearest-rank percentiles, used by both benchmark pages.
 - [Replay harness](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/replay.md): records real Jellyfin invocations and replays them through `rrffmpeg` to catch argument, quoting, stream wiring and exit code regressions.
 - [Example config](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/config.example.toml): a working pair of client and worker hosts.
-- [Release 0.7.1](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/releases/0.7.1.md): the recorded fps and speed are the highest running average, past the padding ffmpeg puts in front of them.
+- [Release 0.8.0](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/releases/0.8.0.md): capabilities are sub-tokens proved by one frame per encoder, and `rrffmpeg capabilities` prints the config rows.
 - [Install script](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/scripts/install.sh): downloads the latest release, checks the checksum, installs the binaries and the `ffmpeg` links, and keeps the previous binary for a rollback.
 
 ## Architecture decision records
