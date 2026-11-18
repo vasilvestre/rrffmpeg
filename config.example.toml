@@ -63,7 +63,11 @@ down_ttl_secs = 60
 [[hosts]]
 name = "worker"
 concurrency = 2
-capabilities = ["vaapi"]
+# What this worker proved it can do. Run `rrffmpeg capabilities worker` on the
+# client to print the exact line, one frame per token. An empty list accepts
+# any job; every token a job needs must be listed here.
+# Tokens: vaapi, vaapi_hevc, vaapi_hevc10, vaapi_tonemap, vaapi_vpp, qsv, nvenc.
+capabilities = ["vaapi", "vaapi_hevc"]
 
 # Skip ssh for this host and talk to `rrffmpeg-agent` instead. Hosts without
 # this line keep using ssh, which needs nothing installed on the worker.

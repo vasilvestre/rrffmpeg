@@ -43,6 +43,8 @@ Each entry points at raw Markdown so a reader gets plain text.
 - [0022 Progress sample in the journal](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0022-progress-sample-in-the-journal.md): fps, speed, source and output shape, and copy or encode per stream, read from the worker's stderr and shipped to Loki.
 - [0023 The sample is a peak, not a tail](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0023-the-sample-is-a-peak-not-a-tail.md): why the recorded fps and speed are the highest running average, and why the padding ffmpeg puts before a counter hid it.
 
+- [0024 Declared capabilities](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0024-declared-capabilities.md): one token per real driver limit, why libva and ffmpeg cannot answer it, and the one-frame probe that prints the config rows.
+
 ## Optional
 
 - [Source](https://github.com/vasilvestre/rrffmpeg): repository root, `src/` holds the dispatcher, `tests/` the replay and fidelity tests.

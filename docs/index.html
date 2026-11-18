@@ -156,8 +156,11 @@ of tmpfs, the dispatch rises by 39 ms.</p>
   freed by the kernel when the process dies. The "host down" verdict is shared
   with an expiry, so one failure does not poison the others.</li>
   <li><b>Capability-aware placement.</b> Workers advertise
-  <code>vaapi</code>, <code>nvenc</code>, <code>qsv</code> and their slot
-  count. The scheduler matches instead of applying a global weight.</li>
+  <code>vaapi</code>, <code>vaapi_hevc10</code>, <code>vaapi_tonemap</code>,
+  <code>qsv</code>, <code>nvenc</code> and their slot count. A job that needs
+  10-bit HEVC waits for a worker that encodes it, instead of failing on one
+  that only lists the encoder. The scheduler matches instead of applying a
+  global weight.</li>
   <li><b>Path mapping in both directions.</b> Longest-prefix mapping for input
   and output, so the worker can mount media and the HLS tmpfs at another
   root.</li>
@@ -288,7 +291,7 @@ relayed byte count per job on the agent path.</p>
   <tbody>
     <tr><td><code>name</code></td><td>required</td><td>SSH target: a hostname or an alias from <code>~/.ssh/config</code>. With <code>agent_addr</code> it is only a label and a seed for the slot lock file.</td></tr>
     <tr><td><code>concurrency</code></td><td><code>1</code></td><td>Slots on this host. Each slot is an exclusive lock file, so a forked job cannot exceed it.</td></tr>
-    <tr><td><code>capabilities</code></td><td><code>[]</code></td><td>Advertised encoders, for example <code>["vaapi"]</code>.</td></tr>
+    <tr><td><code>capabilities</code></td><td><code>[]</code></td><td>What the worker proved it can do. Tokens: <code>vaapi</code>, <code>vaapi_hevc</code>, <code>vaapi_hevc10</code>, <code>vaapi_tonemap</code>, <code>vaapi_vpp</code>, <code>qsv</code>, <code>nvenc</code>. A job needs all of them; an empty list accepts any job. Generate the line with <code>rrffmpeg capabilities</code>.</td></tr>
     <tr><td><code>ffmpeg_bin</code></td><td>inherited</td><td>ffmpeg path on the worker.</td></tr>
     <tr><td><code>ffprobe_bin</code></td><td>inherited</td><td>ffprobe path on the worker.</td></tr>
     <tr><td><code>agent_addr</code></td><td>none</td><td><code>host:port</code> of <code>rrffmpeg-agent</code>. Set it to skip SSH for this host. Its host part must appear in the certificate.</td></tr>
@@ -348,7 +351,7 @@ down_ttl_secs = 60
 [[hosts]]
 name = "worker"
 concurrency = 2
-capabilities = ["vaapi"]
+capabilities = ["vaapi", "vaapi_hevc10"]
 
 # Uncomment to use the agent instead of SSH for this host.
 # agent_addr = "worker:9876"

@@ -1,6 +1,7 @@
 //! Dispatch core shared by the binary and the tests.
 
 pub mod agent;
+pub mod capabilities;
 pub mod config;
 pub mod janitor;
 pub mod locks;
@@ -29,8 +30,10 @@ pub struct Job {
     pub args: Vec<OsString>,
     /// Lower runs first: probes and seeks beat long transcodes.
     pub priority: i32,
-    /// Capability the worker must advertise, for example `vaapi`.
-    pub capability: Option<String>,
+    /// Capabilities the worker must advertise, for example `vaapi` plus
+    /// `vaapi_hevc10`. All of them must match, because a host that encodes
+    /// H.264 in hardware can still lack 10-bit HEVC.
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug)]

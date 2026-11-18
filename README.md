@@ -218,9 +218,13 @@ Rules that apply once a worker is configured:
 4. A worker that needs variables around ffmpeg gets `[hosts.env]`, not a
    wrapper script. Each value reaches the worker literally, so a space or a `$`
    survives the remote shell. The agent transport carries the same map.
-5. Capability matching only reads encoder flags. A `-version` or `-encoders`
-   probe carries no capability, so with several workers it may land on one
-   that cannot encode. With a single worker it does not matter.
+5. Capabilities come from the arguments, and you write them once per host. An
+   encoder names the family (`vaapi`, `qsv`, `nvenc`); `main10`, `p010` and a
+   `tonemap_vaapi` filter add `vaapi_hevc10` and `vaapi_tonemap`. All of them
+   must match, so a 10-bit job waits for a worker that encodes 10-bit instead
+   of failing on one that only lists the encoder. Nothing probes on dispatch:
+   run `rrffmpeg capabilities` on the client to print the exact rows, and paste
+   them. A `-version` or `-encoders` probe carries no capability at all.
 6. Measure before you add the agent. Time `ffprobe -version` through the
    dispatcher a few hundred times. SSH keeps one connection per host open for
    `ssh_persist_secs` (300 by default), so a job opens a channel instead of
@@ -240,7 +244,6 @@ client_weight = 400   # 1 to 1000, same scale as the kernel's IO weight
 
 ## Later
 
-- Capability-aware placement that reads more than encoder flags.
 - Multi-worker balancing.
 - A recording of trickplay extraction and of a failing probe. The other job
   classes are already replayed from real invocations.

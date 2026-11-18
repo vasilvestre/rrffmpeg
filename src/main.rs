@@ -10,7 +10,7 @@ use rrffmpeg::locks::LockDir;
 use rrffmpeg::scheduler::Scheduler;
 use rrffmpeg::state::{Event, Journal};
 use rrffmpeg::transport::{Persist, Router, Ssh, Transport};
-use rrffmpeg::{Error, Job, Program, Result, config::Config, paths};
+use rrffmpeg::{Error, Job, Program, Result, capabilities, config::Config, paths};
 use std::ffi::OsString;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
@@ -58,6 +58,12 @@ fn run() -> Result<i32> {
 
     let program = program_for(&argv0, &args);
     let config = Config::load()?;
+    // `rrffmpeg capabilities [host]` prints the tokens each worker proves, in
+    // the shape `config.example.toml` wants. Run it on the client, against the
+    // real workers, after a driver or ffmpeg update.
+    if invoked_as_rrffmpeg(&argv0) && args.first().is_some_and(|a| a == "capabilities") {
+        return capabilities_command(&config, &args[1..]);
+    }
     let agent = agent_client(&config)?;
     if agent.is_none() && config.hosts.iter().any(|h| h.agent_addr.is_some()) {
         return Err(Error::Config(
@@ -107,7 +113,7 @@ fn run() -> Result<i32> {
         args: args.clone(),
         // Probes and seeks jump the queue; a transcode only starts when a slot frees.
         priority: if program == Program::Ffprobe { -5 } else { 0 },
-        capability: required_capability(&args),
+        capabilities: capabilities::required(&args),
     };
 
     let wait = Duration::from_secs(config.queue_wait_secs);
@@ -268,8 +274,41 @@ fn agent_client(config: &Config) -> Result<Option<rrffmpeg::agent::Agent>> {
 }
 
 /// SSH transport, with one persistent connection per host when configured.
+/// Prints one TOML `capabilities` row per host, or one host when named.
+/// Returns 1 when a probe fails, so a script can tell "no GPU" from "quiet".
+fn capabilities_command(config: &Config, args: &[OsString]) -> Result<i32> {
+    let wanted = args.first().and_then(|a| a.to_str());
+    let ssh = ssh_transport(config)?;
+    let mut failed = false;
+    let mut probed = 0;
+    for host in &config.hosts {
+        if wanted.is_some_and(|w| w != host.name) {
+            continue;
+        }
+        probed += 1;
+        match ssh.probe_capabilities(host) {
+            Ok(tokens) => {
+                let list: Vec<String> = tokens.iter().map(|t| format!("\"{t}\"")).collect();
+                println!("# {}\ncapabilities = [{}]", host.name, list.join(", "));
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                failed = true;
+            }
+        }
+    }
+    if probed == 0 {
+        return Err(Error::Config(format!(
+            "no host matches {:?}",
+            wanted.unwrap_or("")
+        )));
+    }
+    Ok(if failed { 1 } else { 0 })
+}
+
 fn ssh_transport(config: &Config) -> Result<Ssh> {
     let mut ssh = Ssh::new(config.ssh_bin.clone());
+
     ssh.ssh_args = config.ssh_args.clone();
     if config.ssh_persist_secs == 0 {
         return Ok(ssh);
@@ -317,20 +356,6 @@ fn private_dir(dir: &Path) -> Result<PathBuf> {
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
         .map_err(|e| Error::Io(e, format!("setting mode on {}", dir.display())))?;
     Ok(dir.to_path_buf())
-}
-
-/// The encoder in the arguments tells us which worker can run the job.
-/// Jellyfin passes `-c:v h264_vaapi`, `hevc_nvenc`, `h264_qsv` and friends.
-fn required_capability(args: &[OsString]) -> Option<String> {
-    for arg in args {
-        let text = arg.to_string_lossy();
-        for cap in ["vaapi", "nvenc", "qsv", "amf", "videotoolbox"] {
-            if text.ends_with(cap) || text.ends_with(&format!("_{cap}")) {
-                return Some(cap.to_string());
-            }
-        }
-    }
-    None
 }
 
 fn invoked_as_rrffmpeg(argv0: &OsString) -> bool {
@@ -438,23 +463,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn capability_comes_from_the_encoder_name() {
-        assert_eq!(
-            required_capability(&args(&["-c:v", "hevc_vaapi", "-i", "/m/x.mkv"])),
-            Some("vaapi".into())
-        );
-        assert_eq!(
-            required_capability(&args(&["-hwaccel", "nvenc", "-i", "/m/x.mkv"])),
-            Some("nvenc".into())
-        );
-        assert_eq!(
-            required_capability(&args(&["-c:v", "libx264", "-i", "/m/x.mkv"])),
-            None
-        );
-        assert_eq!(required_capability(&args(&["-c", "copy"])), None);
-    }
-
     /// Fails the first dispatch only, then succeeds: the shape of a lost
     /// handshake on one worker while another is healthy.
     struct Flaky {
@@ -519,7 +527,7 @@ mod tests {
             program: Program::Ffmpeg,
             args: args(&["-i", "file:/m/x.mkv"]),
             priority: 0,
-            capability: None,
+            capabilities: Vec::new(),
         };
 
         let got = dispatch(

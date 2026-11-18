@@ -82,14 +82,14 @@ impl Scheduler {
         // through, and a stream of fresh callers can starve it for good.
         for host in &self.hosts {
             if !self.locks.is_down(&host.name)
-                && self.capability_ok(host, job.capability.as_deref())
+                && self.capability_ok(host, job.capabilities.as_slice())
                 && self.queue.has_waiters(&host.name)
             {
                 return None;
             }
         }
         for _ in 0..ACQUIRE_PASSES {
-            let index = self.pick_host(job.capability.as_deref())?;
+            let index = self.pick_host(job.capabilities.as_slice())?;
             let host = &self.hosts[index];
             if let Some(guard) = self.locks.try_acquire(host, &job.id) {
                 return Some(Lease {
@@ -127,7 +127,7 @@ impl Scheduler {
                 }
                 refresh_due = Instant::now() + REFRESH_EVERY;
             }
-            if let Some(index) = self.pick_host(job.capability.as_deref()) {
+            if let Some(index) = self.pick_host(job.capabilities.as_slice()) {
                 // A free slot means the queue is draining now, so poll fast
                 // even if a ticket still ranks ahead: otherwise a job sleeps
                 // through its own turn at the backoff rate, and a loaded
@@ -165,7 +165,7 @@ impl Scheduler {
     fn lanes(&self, job: &Job) -> HashMap<String, Lane> {
         let mut lanes = HashMap::new();
         for host in &self.hosts {
-            if self.is_down(&host.name) || !self.capability_ok(host, job.capability.as_deref()) {
+            if self.is_down(&host.name) || !self.capability_ok(host, job.capabilities.as_slice()) {
                 continue;
             }
             let lane = self
@@ -193,18 +193,18 @@ impl Scheduler {
         self.locks.is_down(host)
     }
 
-    fn capability_ok(&self, host: &Host, capability: Option<&str>) -> bool {
-        match capability {
-            None => true,
-            Some(need) => {
-                host.capabilities.is_empty() || host.capabilities.iter().any(|c| c == need)
-            }
-        }
+    /// Every capability the job needs must be advertised. One match is not
+    /// enough: a host that encodes H.264 in hardware can still lack 10-bit
+    /// HEVC or tone mapping.
+    fn capability_ok(&self, host: &Host, need: &[String]) -> bool {
+        need.is_empty()
+            || host.capabilities.is_empty()
+            || need.iter().all(|n| host.capabilities.contains(n))
     }
 
     /// Best eligible host with a free slot, or None. A down host is never
     /// eligible.
-    fn pick_host(&self, capability: Option<&str>) -> Option<usize> {
+    fn pick_host(&self, capability: &[String]) -> Option<usize> {
         let mut best: Option<(usize, usize)> = None;
         for (index, host) in self.hosts.iter().enumerate() {
             if self.locks.is_down(&host.name) {
@@ -279,13 +279,13 @@ mod tests {
         }
     }
 
-    fn job(priority: i32, capability: Option<&str>) -> Job {
+    fn job(priority: i32, capability: &[&str]) -> Job {
         Job {
             id: "job".to_string(),
             program: Program::Ffmpeg,
             args: Vec::new(),
             priority,
-            capability: capability.map(|c| c.to_string()),
+            capabilities: capability.iter().map(|c| c.to_string()).collect(),
         }
     }
 
@@ -329,7 +329,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 barrier.wait();
                 let lease = scheduler
-                    .acquire_blocking(&job(0, None), Duration::from_secs(5))
+                    .acquire_blocking(&job(0, &[]), Duration::from_secs(5))
                     .expect("a slot within five seconds");
                 let now = held.fetch_add(1, Ordering::SeqCst) + 1;
                 peak.fetch_max(now, Ordering::SeqCst);
@@ -352,14 +352,14 @@ mod tests {
             vec![host("vaapi", 1, &["vaapi"]), host("nvenc", 1, &["nvenc"])],
             "capability",
         );
-        let lease = scheduler.acquire(&job(0, Some("nvenc"))).expect("a lease");
+        let lease = scheduler.acquire(&job(0, &["nvenc"])).expect("a lease");
         assert_eq!(lease.host.name, "nvenc");
         drop(lease);
         let _ = std::fs::remove_dir_all(dir);
 
         // Empty capabilities on a host accept any job.
         let (dir, open) = build(vec![host("open", 1, &[])], "open");
-        let lease = open.acquire(&job(0, Some("qsv"))).expect("a lease");
+        let lease = open.acquire(&job(0, &["qsv"])).expect("a lease");
         assert_eq!(lease.host.name, "open");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -370,11 +370,11 @@ mod tests {
         let _serial = crate::exclusive();
         scheduler.mark_down("w");
         assert!(scheduler.is_down("w"));
-        assert!(scheduler.acquire(&job(0, None)).is_none());
+        assert!(scheduler.acquire(&job(0, &[])).is_none());
 
         scheduler.mark_up("w");
         assert!(!scheduler.is_down("w"));
-        let lease = scheduler.acquire(&job(0, None)).expect("a lease");
+        let lease = scheduler.acquire(&job(0, &[])).expect("a lease");
         assert_eq!(lease.host.name, "w");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -385,11 +385,11 @@ mod tests {
         let _serial = crate::exclusive();
         let mut leases = Vec::new();
         for _ in 0..4 {
-            leases.push(scheduler.acquire(&job(0, None)).expect("a lease"));
+            leases.push(scheduler.acquire(&job(0, &[])).expect("a lease"));
         }
         let order: Vec<&str> = leases.iter().map(|l| l.host.name.as_str()).collect();
         assert_eq!(order, ["a", "b", "a", "b"]);
-        assert!(scheduler.acquire(&job(0, None)).is_none());
+        assert!(scheduler.acquire(&job(0, &[])).is_none());
         drop(leases);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -403,16 +403,16 @@ mod tests {
             locks,
             Duration::from_secs(60),
         ));
-        let held = scheduler.acquire(&job(0, None)).expect("the only slot");
+        let held = scheduler.acquire(&job(0, &[])).expect("the only slot");
         assert!(
             scheduler
-                .acquire_blocking(&job(0, None), Duration::from_millis(50))
+                .acquire_blocking(&job(0, &[]), Duration::from_millis(50))
                 .is_none()
         );
 
         let waiter = {
             let scheduler = Arc::clone(&scheduler);
-            thread::spawn(move || scheduler.acquire_blocking(&job(0, None), Duration::from_secs(2)))
+            thread::spawn(move || scheduler.acquire_blocking(&job(0, &[]), Duration::from_secs(2)))
         };
         thread::sleep(Duration::from_millis(50));
         drop(held);
@@ -429,17 +429,17 @@ mod tests {
             locks,
             Duration::from_secs(60),
         ));
-        let held = scheduler.acquire(&job(0, None)).expect("the only slot");
+        let held = scheduler.acquire(&job(0, &[])).expect("the only slot");
 
         let transcode = {
             let scheduler = Arc::clone(&scheduler);
-            thread::spawn(move || scheduler.acquire_blocking(&job(0, None), Duration::from_secs(5)))
+            thread::spawn(move || scheduler.acquire_blocking(&job(0, &[]), Duration::from_secs(5)))
         };
         thread::sleep(Duration::from_millis(200));
         let probe = {
             let scheduler = Arc::clone(&scheduler);
             thread::spawn(move || {
-                scheduler.acquire_blocking(&job(-5, None), Duration::from_secs(5))
+                scheduler.acquire_blocking(&job(-5, &[]), Duration::from_secs(5))
             })
         };
         thread::sleep(Duration::from_millis(200));
@@ -467,13 +467,13 @@ mod tests {
             locks,
             Duration::from_secs(60),
         ));
-        let first = scheduler.acquire(&job(0, None)).expect("first slot");
-        let second = scheduler.acquire(&job(0, None)).expect("second slot");
+        let first = scheduler.acquire(&job(0, &[])).expect("first slot");
+        let second = scheduler.acquire(&job(0, &[])).expect("second slot");
 
         // Both slots are held, so this one has to publish a ticket and wait.
         let waiter = {
             let scheduler = Arc::clone(&scheduler);
-            thread::spawn(move || scheduler.acquire_blocking(&job(0, None), Duration::from_secs(5)))
+            thread::spawn(move || scheduler.acquire_blocking(&job(0, &[]), Duration::from_secs(5)))
         };
         thread::sleep(Duration::from_millis(100));
         assert!(
@@ -485,7 +485,7 @@ mod tests {
         // the check the newcomer takes it and the waiter loses its turn.
         drop(second);
         assert!(
-            scheduler.acquire(&job(0, None)).is_none(),
+            scheduler.acquire(&job(0, &[])).is_none(),
             "a newcomer must queue behind the waiter"
         );
 
@@ -508,10 +508,10 @@ mod tests {
             )
             .with_client("alice", 300),
         );
-        let held = scheduler.acquire(&job(0, None)).expect("the only slot");
+        let held = scheduler.acquire(&job(0, &[])).expect("the only slot");
         let waiter = {
             let scheduler = Arc::clone(&scheduler);
-            thread::spawn(move || scheduler.acquire_blocking(&job(0, None), Duration::from_secs(2)))
+            thread::spawn(move || scheduler.acquire_blocking(&job(0, &[]), Duration::from_secs(2)))
         };
         thread::sleep(Duration::from_millis(150));
         drop(held);

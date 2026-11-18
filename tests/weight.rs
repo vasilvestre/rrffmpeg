@@ -60,7 +60,7 @@ fn a_ticket_stays_fresh_while_the_only_slot_is_busy() {
         program: Program::Ffmpeg,
         args: Vec::new(),
         priority: 0,
-        capability: None,
+        capabilities: Vec::new(),
     };
 
     let holder = scheduler.clone();
@@ -135,7 +135,7 @@ fn the_weight_sets_the_order_of_starts_under_contention() {
                 program: Program::Ffmpeg,
                 args: Vec::new(),
                 priority: 0,
-                capability: None,
+                capabilities: Vec::new(),
             };
             let lease = scheduler
                 .acquire_blocking(&job, Duration::from_secs(60))

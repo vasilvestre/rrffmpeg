@@ -85,6 +85,35 @@ impl Ssh {
             .collect()
     }
 
+    /// Runs [`crate::capabilities::script`] on the worker and returns the
+    /// tokens it printed. A probe, not a job: no pid file, no journal row.
+    pub fn probe_capabilities(&self, host: &Host) -> Result<Vec<String>> {
+        let ffmpeg = host.ffmpeg_bin.as_deref().unwrap_or("ffmpeg");
+        let out = Command::new(&self.ssh_bin)
+            .arg("-T")
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg(format!("ConnectTimeout={}", self.connect_timeout()))
+            .args(self.persist_args())
+            .args(self.ssh_args(host))
+            .arg("--")
+            .arg(&host.name)
+            .arg(crate::capabilities::script(ffmpeg))
+            .output()
+            .map_err(|e| Error::Io(e, format!("probing {}", host.name)))?;
+        if !out.status.success() {
+            return Err(Error::Transport(format!(
+                "capability probe on {} failed: {}",
+                host.name,
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(crate::capabilities::parse(&String::from_utf8_lossy(
+            &out.stdout,
+        )))
+    }
+
     /// `mkdir -p ... && echo $$ > <pid> && exec <program> <args> [2>&1]`.
     ///
     /// `$$` is not quoted: the remote shell expands it before `exec` replaces
@@ -419,7 +448,7 @@ mod tests {
             program: Program::Ffmpeg,
             args: args.iter().map(OsString::from).collect(),
             priority: 0,
-            capability: None,
+            capabilities: Vec::new(),
         }
     }
 

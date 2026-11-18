@@ -60,7 +60,7 @@ fn job(id: u64) -> Job {
         program: Program::Ffmpeg,
         args: Vec::<OsString>::new(),
         priority: 0,
-        capability: None,
+        capabilities: Vec::new(),
     }
 }
 

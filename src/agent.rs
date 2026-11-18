@@ -1023,7 +1023,7 @@ mod tests {
             program: Program::Ffmpeg,
             args: args.iter().map(OsString::from).collect(),
             priority: 0,
-            capability: None,
+            capabilities: Vec::new(),
         }
     }
 
