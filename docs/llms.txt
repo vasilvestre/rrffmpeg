@@ -51,6 +51,7 @@ Each entry points at raw Markdown so a reader gets plain text.
 - [0025 Reserved sequence numbers](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0025-sequence-numbers-are-reserved-per-process.md): why concurrent processes shared a journal `seq`, and why a block reservation at open fixes identity without touching the record format.
 - [0026 Exclusive blocks](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0026-a-block-is-exclusive-and-replay-never-moves-the-writer.md): why replaying the journal must not move the writer, and how a full block is renewed.
 - [0027 AV1 is a codec token](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0027-av1-is-a-codec-token.md): why an `av1_vaapi` job needed its own token, and why a UHD 630 or an N100 cannot encode AV1.
+- [0028 Jellyfin settings audit](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0028-jellyfin-settings-audit.md): why `rrffmpeg jellyfin` turns each Jellyfin knob into an argument set and reuses the placement rule instead of a second token table.
 
 ## Optional
 

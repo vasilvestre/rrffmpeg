@@ -10,7 +10,7 @@ use rrffmpeg::locks::LockDir;
 use rrffmpeg::scheduler::Scheduler;
 use rrffmpeg::state::{Event, Journal};
 use rrffmpeg::transport::{Persist, Router, Ssh, Transport};
-use rrffmpeg::{Error, Job, Program, Result, capabilities, config::Config, paths};
+use rrffmpeg::{Error, Job, Program, Result, capabilities, config::Config, jellyfin, paths};
 use std::ffi::OsString;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
@@ -53,6 +53,11 @@ fn run() -> Result<i32> {
     // real workers, after a driver or ffmpeg update.
     if invoked_as_rrffmpeg(&argv0) && args.first().is_some_and(|a| a == "capabilities") {
         return capabilities_command(&config, &args[1..]);
+    }
+    // `rrffmpeg jellyfin` compares Jellyfin's transcode settings with what the
+    // workers advertise. It reads only: nothing is written to encoding.xml.
+    if invoked_as_rrffmpeg(&argv0) && args.first().is_some_and(|a| a == "jellyfin") {
+        return jellyfin_command(&config, &args[1..]);
     }
     let agent = agent_client(&config)?;
     if agent.is_none() && config.hosts.iter().any(|h| h.agent_addr.is_some()) {
@@ -266,18 +271,33 @@ fn agent_client(config: &Config) -> Result<Option<rrffmpeg::agent::Agent>> {
 
 /// SSH transport, with one persistent connection per host when configured.
 /// Prints one TOML `capabilities` row per host, or one host when named.
+/// `--device` names the VAAPI node to test; it must be Jellyfin's
+/// `VaapiDevice`, or the tokens describe another GPU.
 /// Returns 1 when a probe fails, so a script can tell "no GPU" from "quiet".
 fn capabilities_command(config: &Config, args: &[OsString]) -> Result<i32> {
-    let wanted = args.first().and_then(|a| a.to_str());
+    let mut wanted: Option<String> = None;
+    let mut device = capabilities::DEFAULT_VAAPI_DEVICE.to_string();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.to_str().unwrap_or_default() {
+            "--device" => device = value(&mut rest, "--device")?,
+            flag if flag.starts_with("--") => {
+                return Err(Error::Config(format!(
+                    "unknown argument {flag:?}: try a host name or --device"
+                )));
+            }
+            host => wanted = Some(host.to_string()),
+        }
+    }
     let ssh = ssh_transport(config)?;
     let mut failed = false;
     let mut probed = 0;
     for host in &config.hosts {
-        if wanted.is_some_and(|w| w != host.name) {
+        if wanted.as_deref().is_some_and(|w| w != host.name) {
             continue;
         }
         probed += 1;
-        match ssh.probe_capabilities(host) {
+        match ssh.probe_capabilities(host, &device) {
             Ok(tokens) => {
                 let list: Vec<String> = tokens.iter().map(|t| format!("\"{t}\"")).collect();
                 println!("# {}\ncapabilities = [{}]", host.name, list.join(", "));
@@ -291,10 +311,84 @@ fn capabilities_command(config: &Config, args: &[OsString]) -> Result<i32> {
     if probed == 0 {
         return Err(Error::Config(format!(
             "no host matches {:?}",
-            wanted.unwrap_or("")
+            wanted.unwrap_or_default()
         )));
     }
     Ok(if failed { 1 } else { 0 })
+}
+
+/// The value after a flag, or a config error naming the flag.
+fn value(args: &mut std::slice::Iter<'_, OsString>, flag: &str) -> Result<String> {
+    args.next()
+        .and_then(|arg| arg.to_str().map(str::to_string))
+        .ok_or_else(|| Error::Config(format!("{flag} needs a value")))
+}
+
+/// Compares Jellyfin's `encoding.xml` with what the workers advertise, and
+/// prints what placement can serve. Reads only: it never edits the file.
+/// Returns 1 when a setting no worker can serve, so a script can gate on it.
+fn jellyfin_command(config: &Config, args: &[OsString]) -> Result<i32> {
+    let mut path: Option<PathBuf> = None;
+    let mut host_filter: Option<String> = None;
+    let mut device = capabilities::DEFAULT_VAAPI_DEVICE.to_string();
+    let mut probe = false;
+    let mut json = false;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.to_str().unwrap_or_default() {
+            "--path" => path = Some(PathBuf::from(value(&mut rest, "--path")?)),
+            "--host" => host_filter = Some(value(&mut rest, "--host")?),
+            "--device" => device = value(&mut rest, "--device")?,
+            "--probe" => probe = true,
+            "--json" => json = true,
+            other => {
+                return Err(Error::Config(format!(
+                    "unknown argument {other:?}: try --path, --host, --device, --probe or --json"
+                )));
+            }
+        }
+    }
+    let path = jellyfin::find(path)?;
+    let xml = std::fs::read_to_string(&path)
+        .map_err(|e| Error::Io(e, format!("reading {}", path.display())))?;
+    let settings = jellyfin::parse(&xml);
+    let mut workers = jellyfin::workers(config);
+    if let Some(name) = &host_filter {
+        workers.retain(|worker| &worker.name == name);
+        if workers.is_empty() {
+            return Err(Error::Config(format!("no host matches {name:?}")));
+        }
+    }
+    // The declared list is what placement reads, so it is the default. A probe
+    // shows the drift between the config and the driver.
+    let mut failed = false;
+    if probe {
+        let ssh = ssh_transport(config)?;
+        for host in &config.hosts {
+            if !workers.iter().any(|worker| worker.name == host.name) {
+                continue;
+            }
+            match ssh.probe_capabilities(host, &device) {
+                Ok(tokens) => {
+                    if let Some(worker) = workers.iter_mut().find(|w| w.name == host.name) {
+                        worker.tokens = tokens;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    failed = true;
+                }
+            }
+        }
+    }
+    let rows = jellyfin::rows(&settings, &workers, &device);
+    if json {
+        println!("{}", jellyfin::json(&path, &rows));
+    } else {
+        jellyfin::print(&path, &rows);
+    }
+    let broken = rows.iter().any(|row| row.verdict == "broken");
+    Ok(if failed || broken { 1 } else { 0 })
 }
 
 fn ssh_transport(config: &Config) -> Result<Ssh> {

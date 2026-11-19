@@ -87,7 +87,8 @@ impl Ssh {
 
     /// Runs [`crate::capabilities::script`] on the worker and returns the
     /// tokens it printed. A probe, not a job: no pid file, no journal row.
-    pub fn probe_capabilities(&self, host: &Host) -> Result<Vec<String>> {
+    /// `device` must be the render node Jellyfin uses.
+    pub fn probe_capabilities(&self, host: &Host, device: &str) -> Result<Vec<String>> {
         let ffmpeg = host.ffmpeg_bin.as_deref().unwrap_or("ffmpeg");
         let out = Command::new(&self.ssh_bin)
             .arg("-T")
@@ -99,7 +100,7 @@ impl Ssh {
             .args(self.ssh_args(host))
             .arg("--")
             .arg(&host.name)
-            .arg(crate::capabilities::script(ffmpeg))
+            .arg(crate::capabilities::script(ffmpeg, device))
             .output()
             .map_err(|e| Error::Io(e, format!("probing {}", host.name)))?;
         if !out.status.success() {

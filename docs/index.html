@@ -291,7 +291,7 @@ relayed byte count per job on the agent path.</p>
   <tbody>
     <tr><td><code>name</code></td><td>required</td><td>SSH target: a hostname or an alias from <code>~/.ssh/config</code>. With <code>agent_addr</code> it is only a label and a seed for the slot lock file.</td></tr>
     <tr><td><code>concurrency</code></td><td><code>1</code></td><td>Slots on this host. Each slot is an exclusive lock file, so a forked job cannot exceed it.</td></tr>
-    <tr><td><code>capabilities</code></td><td><code>[]</code></td><td>What the worker proved it can do. Tokens: <code>vaapi</code>, <code>vaapi_hevc</code>, <code>vaapi_hevc10</code>, <code>vaapi_av1</code>, <code>vaapi_tonemap</code>, <code>vaapi_vpp</code>, <code>qsv</code>, <code>qsv_av1</code>, <code>nvenc</code>, <code>nvenc_av1</code>. A job needs all of them; an empty list accepts any job. Generate the line with <code>rrffmpeg capabilities</code>.</td></tr>
+    <tr><td><code>capabilities</code></td><td><code>[]</code></td><td>What the worker proved it can do. Tokens: <code>vaapi</code>, <code>vaapi_hevc</code>, <code>vaapi_hevc10</code>, <code>vaapi_av1</code>, <code>vaapi_tonemap</code>, <code>vaapi_vpp</code>, <code>qsv</code>, <code>qsv_av1</code>, <code>nvenc</code>, <code>nvenc_av1</code>. A job needs all of them; an empty list accepts any job. Generate the line with <code>rrffmpeg capabilities</code>, and pass <code>--device</code> when <code>VaapiDevice</code> is not <code>/dev/dri/renderD128</code>.</td></tr>
     <tr><td><code>ffmpeg_bin</code></td><td>inherited</td><td>ffmpeg path on the worker.</td></tr>
     <tr><td><code>ffprobe_bin</code></td><td>inherited</td><td>ffprobe path on the worker.</td></tr>
     <tr><td><code>agent_addr</code></td><td>none</td><td><code>host:port</code> of <code>rrffmpeg-agent</code>. Set it to skip SSH for this host. Its host part must appear in the certificate.</td></tr>
@@ -367,6 +367,35 @@ to = "/home/bob/media"
 from = "/dev/shm/jellyfin-transcode"
 to = "/home/bob/transcode"</code></pre>
 
+<h2>Checking Jellyfin's settings</h2>
+
+<p><code>rrffmpeg jellyfin</code> reads Jellyfin's <code>encoding.xml</code> and
+compares each transcode setting with the <code>capabilities</code> of your
+hosts. It prints a table, and exits 1 when a setting no worker can serve. It
+reads the file only: nothing is written, and Jellyfin needs no restart.</p>
+
+<pre><code>rrffmpeg jellyfin                  # /etc/jellyfin/encoding.xml
+rrffmpeg jellyfin --path ~/.config/jellyfin/config/encoding.xml --probe
+rrffmpeg jellyfin --device /dev/dri/renderD129 --json</code></pre>
+
+<p>Every knob only chooses the arguments Jellyfin emits, and the dispatcher
+passes those through unchanged. So the audit turns each knob into an argument
+set and asks the same function placement uses which tokens it needs. Verdicts:
+<code>ok</code> means every host serves it; <code>partial</code> names the hosts
+that cannot, and a job sent to one of them waits or fails after taking a slot;
+<code>broken</code> means no host can serve it and sets the exit code;
+<code>unknown</code> means the one-frame probe cannot answer, which covers AV1
+decode and the OpenCL tone-mapping path; <code>warn</code> flags a problem that
+is not about routing, such as <code>EncodingThreadCount=-1</code> on a host that
+runs several jobs.</p>
+
+<p>Two checks do not come from tokens. <code>VaapiDevice</code> must be the
+device the probe tested, or the tokens describe another GPU: pass
+<code>--device</code> to <code>jellyfin</code> and to
+<code>capabilities</code>. <code>TranscodingTempPath</code> must fall under a
+<code>paths</code> map, or the worker writes segments to a path it does not
+mount.</p>
+
 <h2>Status</h2>
 
 <p>Working today: passthrough verified against real ffmpeg 8.0.1, one worker
@@ -376,6 +405,11 @@ processes, and a replay test driven by invocations recorded from a real
 Jellyfin server. A job that fails before the worker starts ffmpeg is retried
 once on another host (ADR 0013). A job whose client dies is not replayed:
 nobody is left to read its output.</p>
+
+<p><code>rrffmpeg jellyfin</code> compares Jellyfin's transcode settings with
+the declared capabilities and reports what placement can serve, including a
+<code>VaapiDevice</code> that the probe did not test and a
+<code>TranscodingTempPath</code> no path map covers (ADR 0028).</p>
 
 <p>Design choices and their costs are written down in the
 <a href="adr/">decision records</a>.</p>

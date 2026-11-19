@@ -9,6 +9,10 @@
 
 use std::ffi::OsString;
 
+/// The VAAPI device the probe tests unless the caller names another one. It
+/// must match Jellyfin's `VaapiDevice`, or every token describes another GPU.
+pub const DEFAULT_VAAPI_DEVICE: &str = "/dev/dri/renderD128";
+
 /// One encoder test: the token it prints, whether it needs the VAAPI device,
 /// and the arguments after the shared source. The tone-map test is separate:
 /// it builds an HDR clip first.
@@ -48,21 +52,25 @@ pub fn tokens() -> Vec<&'static str> {
 
 /// The one-line shell command the probe runs on the worker.
 ///
+/// `device` is the VAAPI render node to test, normally
+/// [`DEFAULT_VAAPI_DEVICE`]. It must be Jellyfin's `VaapiDevice`, or a token
+/// proves the wrong GPU.
+///
 /// It must stay a single line: a seedbox login shell may be a restricted
 /// wrapper that accepts a command but not a script on stdin. Every test is
 /// bounded, so a wedged driver cannot hang the caller.
-pub fn script(ffmpeg: &str) -> String {
+pub fn script(ffmpeg: &str, device: &str) -> String {
     let f = crate::transport::shell_quote(ffmpeg);
     let run = format!("timeout 30 {f} -hide_banner -loglevel error -nostdin -y");
     let src = "-f lavfi -i color=c=black:s=320x180:r=5:d=0.2";
-    let dev = "-vaapi_device /dev/dri/renderD128";
+    let devflag = format!("-vaapi_device {}", crate::transport::shell_quote(device));
     let null = "-frames:v 1 -f null -";
     // Each entry is a complete statement: it prints its own token, so a
     // failing test cannot swallow the next one.
     let mut out = String::new();
     for (token, needs_dev, tail) in CASES {
         let dev = if needs_dev {
-            format!(" {dev}")
+            format!(" {devflag}")
         } else {
             String::new()
         };
@@ -72,7 +80,7 @@ pub fn script(ffmpeg: &str) -> String {
     // tonemap_vaapi refuses a frame with no mastering display, so this test
     // builds a two-frame HDR clip first. Without libx265 the token is absent.
     out.push_str(&format!(
-        "h=$(mktemp -d)/h.mkv; ( {run} {src} -vf setparams=color_trc=smpte2084:colorspace=bt2020nc:color_primaries=bt2020,format=p010le -c:v libx265 -preset ultrafast -x265-params 'log-level=error:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400' $h && {run} {dev} -i $h -vf format=p010,hwupload,tonemap_vaapi=format=nv12 -c:v h264_vaapi {null} ) >/dev/null 2>&1 && echo vaapi_tonemap; rm -rf ${{h%/*}}; "
+        "h=$(mktemp -d)/h.mkv; ( {run} {src} -vf setparams=color_trc=smpte2084:colorspace=bt2020nc:color_primaries=bt2020,format=p010le -c:v libx265 -preset ultrafast -x265-params 'log-level=error:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400' $h && {run} {devflag} -i $h -vf format=p010,hwupload,tonemap_vaapi=format=nv12 -c:v h264_vaapi {null} ) >/dev/null 2>&1 && echo vaapi_tonemap; rm -rf ${{h%/*}}; "
     ));
     out.push_str("true");
     out
@@ -213,10 +221,18 @@ mod tests {
 
     #[test]
     fn the_script_runs_one_command_per_token() {
-        let s = script("ffmpeg");
+        let s = script("ffmpeg", DEFAULT_VAAPI_DEVICE);
         assert!(s.matches("timeout 30").count() > tokens().len());
         assert!(s.ends_with("true"));
         assert!(!s.contains('\n'));
+    }
+
+    #[test]
+    fn the_script_tests_the_device_it_was_given() {
+        let s = script("ffmpeg", "/dev/dri/renderD129");
+        assert!(s.contains("-vaapi_device"));
+        assert!(s.contains("renderD129"));
+        assert!(!s.contains("renderD128"));
     }
 
     #[test]

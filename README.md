@@ -249,6 +249,43 @@ client_name = "client"
 client_weight = 400   # 1 to 1000, same scale as the kernel's IO weight
 ```
 
+## Match Jellyfin's settings
+
+```bash
+rrffmpeg jellyfin                 # reads /etc/jellyfin/encoding.xml
+rrffmpeg jellyfin --path ~/.config/jellyfin/config/encoding.xml --probe
+```
+
+The command compares the transcode settings with the `capabilities` of every
+host. It reads the file and prints a table; it never writes to it, and it needs
+no restart of Jellyfin.
+
+Each Jellyfin knob only chooses the arguments Jellyfin emits, and the
+dispatcher passes those through unchanged. So the audit turns the knobs into
+argument sets, asks `capabilities::required` which tokens they need, and checks
+who advertises them. The verdicts:
+
+- `ok`: every host can serve it.
+- `partial`: some can, and the detail names the ones that cannot. A job sent
+  to the wrong host waits or fails after taking a slot, so the cost is
+  capacity, not correctness.
+- `broken`: no host can serve it. This is a playback path that cannot work,
+  and the command exits 1.
+- `unknown`: the one-frame probe cannot answer. AV1 decode and the OpenCL
+  tone-mapping path are the real gaps.
+- `warn`: not a routing question. `EncodingThreadCount=-1` on a host with
+  `concurrency` above 1 asks for every core once per job.
+
+It also checks two things the tokens cannot show. `VaapiDevice` must be the
+device the probe tested, or every token describes another GPU: pass `--device`
+to both commands. And `TranscodingTempPath` must fall under a `paths` map, or
+the worker writes segments to a path it does not mount.
+
+`--probe` re-runs the one-frame probe instead of reading the declared list, so
+you see the drift after a driver or ffmpeg update. `--json` prints the same
+rows for a script. Run it after any change to `encoding.xml`, to the config, or
+to a worker's driver.
+
 ## Later
 
 - Multi-worker balancing.

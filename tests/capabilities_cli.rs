@@ -109,6 +109,9 @@ fn a_failed_probe_still_reports_each_host_and_exits_nonzero() {
         .expect("rrffmpeg starts");
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("capability probe on worker failed"), "{stderr}");
+    assert!(
+        stderr.contains("capability probe on worker failed"),
+        "{stderr}"
+    );
     let _ = fs::remove_dir_all(&root);
 }

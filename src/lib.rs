@@ -4,6 +4,7 @@ pub mod agent;
 pub mod capabilities;
 pub mod config;
 pub mod janitor;
+pub mod jellyfin;
 pub mod locks;
 pub mod log;
 pub mod paths;
