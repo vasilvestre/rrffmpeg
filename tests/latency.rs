@@ -482,3 +482,89 @@ fn janitor_recovery() {
     );
     std::io::stdout().flush().ok();
 }
+
+/// The two per-job parsers on the dispatch and relay paths. Numbers only, no
+/// assertion: run it before and after a change to the code they cover.
+#[test]
+#[ignore = "measurement: cargo test --release --test latency -- --ignored --nocapture arg_and_stderr_cost"]
+fn arg_and_stderr_cost() {
+    use rrffmpeg::config::{Host, PathMap};
+    use rrffmpeg::paths::to_worker;
+
+    let host = Host {
+        name: "worker".into(),
+        concurrency: 1,
+        capabilities: vec![],
+        ffmpeg_bin: None,
+        ffprobe_bin: None,
+        agent_addr: None,
+        ssh_args: Vec::new(),
+        env: std::collections::BTreeMap::new(),
+        paths: vec![
+            PathMap {
+                from: "/home/alice".into(),
+                to: "/home/bob/media".into(),
+            },
+            PathMap {
+                from: "/dev/shm/jellyfin-transcode".into(),
+                to: "/home/bob/transcode".into(),
+            },
+        ],
+    };
+    // The shape of a real Jellyfin call: two mapped inputs, one output, and
+    // the flags between them that match no rule.
+    let args: Vec<OsString> = [
+        "file:/home/alice/media/film.mkv",
+        "-map",
+        "0:V:0",
+        "-c:v",
+        "hevc_vaapi",
+        "file:/dev/shm/jellyfin-transcode/seg%05d.ts",
+    ]
+    .iter()
+    .map(OsString::from)
+    .collect();
+
+    const N: usize = 200_000;
+    for _ in 0..1000 {
+        for arg in &args {
+            std::hint::black_box(to_worker(&host, arg));
+        }
+    }
+    let began = Instant::now();
+    for _ in 0..N {
+        for arg in &args {
+            std::hint::black_box(to_worker(&host, arg));
+        }
+    }
+    let path_ns = began.elapsed().as_secs_f64() * 1e9 / (N * args.len()) as f64;
+    println!("path rewrite          n={N}  {path_ns:8.1} ns per argument");
+
+    // One poll of ffmpeg's stderr: the stats line, repeated, inside the 4 KiB
+    // read the relay hands over.
+    let line = "frame= 1491 fps=123 q=-0.0 size=  512kB time=00:01:00.39 \
+                bitrate=1006.2kbits/s speed=   5x\r";
+    let chunk: Vec<u8> = line.repeat(4096 / line.len()).into_bytes();
+    const M: usize = 50_000;
+    for _ in 0..1000 {
+        rrffmpeg::progress::feed(&chunk);
+    }
+    rrffmpeg::progress::take();
+    let began = Instant::now();
+    for _ in 0..M {
+        rrffmpeg::progress::feed(&chunk);
+    }
+    let stats = rrffmpeg::progress::take();
+    let feed_ns = began.elapsed().as_secs_f64() * 1e9 / M as f64;
+    let lines = (chunk.len() / line.len()) as f64;
+    println!(
+        "stderr stats parse    n={M}  {feed_ns:8.1} ns per {:.0} B chunk, {:.1} ns per line",
+        chunk.len() as f64,
+        feed_ns / lines
+    );
+    println!(
+        "parsed fps {:?} speed {:?} src {:?}",
+        stats.fps, stats.speed, stats.src_w
+    );
+    std::io::stdout().flush().ok();
+}
