@@ -12,3 +12,9 @@ rustls-pemfile = "2.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 toml = "1.2.1"
+
+# The binary starts on every ffmpeg call. Strip the symbols no runtime path
+# reads; that is the size win that costs nothing per build. LTO and one codegen
+# unit were measured and moved neither startup nor dispatch, so they are out.
+[profile.release]
+strip = "symbols"
