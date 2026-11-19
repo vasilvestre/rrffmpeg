@@ -12,7 +12,7 @@ is mostly in place. Read the pitch for why, this file for how.
 ## Build and test
 
 ```bash
-cargo test                       # 189 tests, including real ffmpeg 8.x fidelity
+cargo test                       # 280 tests, including real ffmpeg 8.x fidelity
 cargo bench                      # dispatch, journal, queue, progress, scheduler
 cargo clippy --all-targets -- -D warnings
 cargo build --release
