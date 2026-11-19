@@ -36,5 +36,6 @@ ADR-NNNN` and add the new record.
 | [0024](0024-declared-capabilities.md) | Capabilities are declared per host, with one token per real driver limit | Accepted |
 | [0025](0025-sequence-numbers-are-reserved-per-process.md) | Sequence numbers are reserved per process, under a lock at open | Accepted |
 | [0026](0026-a-block-is-exclusive-and-replay-never-moves-the-writer.md) | A journal block is exclusive, and replay never moves the writer | Accepted |
+| [0027](0027-av1-is-a-codec-token.md) | AV1 gets its own codec token per encoder family | Accepted |
 
-All records dated 2026-11-17.
+Records dated 2026-11-17 to 2026-11-19.

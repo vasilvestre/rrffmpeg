@@ -219,12 +219,14 @@ Rules that apply once a worker is configured:
    wrapper script. Each value reaches the worker literally, so a space or a `$`
    survives the remote shell. The agent transport carries the same map.
 5. Capabilities come from the arguments, and you write them once per host. An
-   encoder names the family (`vaapi`, `qsv`, `nvenc`); `main10`, `p010` and a
-   `tonemap_vaapi` filter add `vaapi_hevc10` and `vaapi_tonemap`. All of them
-   must match, so a 10-bit job waits for a worker that encodes 10-bit instead
-   of failing on one that only lists the encoder. Nothing probes on dispatch:
-   run `rrffmpeg capabilities` on the client to print the exact rows, and paste
-   them. A `-version` or `-encoders` probe carries no capability at all.
+   encoder names the family and the codec (`vaapi`, `qsv`, `nvenc`, plus
+   `vaapi_av1`, `qsv_av1` or `nvenc_av1` for an AV1 encoder); `main10`,
+   `p010` and a `tonemap_vaapi` filter add `vaapi_hevc10` and
+   `vaapi_tonemap`. All of them must match, so a 10-bit or AV1 job waits for a
+   worker that can encode it instead of failing on one that only lists the
+   encoder. Nothing probes on dispatch: run `rrffmpeg capabilities` on
+   the client to print the exact rows, and paste them. A `-version` or
+   `-encoders` probe carries no capability at all.
 6. Measure before you add the agent. Time `ffprobe -version` through the
    dispatcher a few hundred times. SSH keeps one connection per host open for
    `ssh_persist_secs` (300 by default), so a job opens a channel instead of

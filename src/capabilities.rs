@@ -9,17 +9,42 @@
 
 use std::ffi::OsString;
 
-/// Every token the probe can report, in the order the scheduler reads them.
-/// A host advertises a subset in `capabilities`.
-pub const TOKENS: [&str; 7] = [
-    "vaapi",
-    "vaapi_hevc",
-    "vaapi_hevc10",
-    "vaapi_tonemap",
-    "vaapi_vpp",
-    "qsv",
-    "nvenc",
+/// One encoder test: the token it prints, whether it needs the VAAPI device,
+/// and the arguments after the shared source. The tone-map test is separate:
+/// it builds an HDR clip first.
+const CASES: [(&str, bool, &str); 9] = [
+    ("vaapi", true, "-vf format=nv12,hwupload -c:v h264_vaapi"),
+    (
+        "vaapi_hevc",
+        true,
+        "-vf format=nv12,hwupload -c:v hevc_vaapi -profile:v main",
+    ),
+    (
+        "vaapi_hevc10",
+        true,
+        "-vf format=p010,hwupload -c:v hevc_vaapi -profile:v main10",
+    ),
+    ("vaapi_av1", true, "-vf format=nv12,hwupload -c:v av1_vaapi"),
+    (
+        "vaapi_vpp",
+        true,
+        "-vf format=nv12,hwupload,scale_vaapi=w=160:h=90 -c:v h264_vaapi",
+    ),
+    ("qsv", false, "-c:v h264_qsv"),
+    ("qsv_av1", false, "-c:v av1_qsv"),
+    ("nvenc", false, "-c:v h264_nvenc"),
+    ("nvenc_av1", false, "-c:v av1_nvenc"),
 ];
+
+/// Every token the probe can report. A host advertises a subset in
+/// `capabilities`.
+pub fn tokens() -> Vec<&'static str> {
+    CASES
+        .iter()
+        .map(|(token, _, _)| *token)
+        .chain(["vaapi_tonemap"])
+        .collect()
+}
 
 /// The one-line shell command the probe runs on the worker.
 ///
@@ -34,34 +59,14 @@ pub fn script(ffmpeg: &str) -> String {
     let null = "-frames:v 1 -f null -";
     // Each entry is a complete statement: it prints its own token, so a
     // failing test cannot swallow the next one.
-    let cases = [
-        (
-            "vaapi",
-            format!("{run} {dev} {src} -vf format=nv12,hwupload -c:v h264_vaapi {null}"),
-        ),
-        (
-            "vaapi_hevc",
-            format!(
-                "{run} {dev} {src} -vf format=nv12,hwupload -c:v hevc_vaapi -profile:v main {null}"
-            ),
-        ),
-        (
-            "vaapi_hevc10",
-            format!(
-                "{run} {dev} {src} -vf format=p010,hwupload -c:v hevc_vaapi -profile:v main10 {null}"
-            ),
-        ),
-        (
-            "vaapi_vpp",
-            format!(
-                "{run} {dev} {src} -vf format=nv12,hwupload,scale_vaapi=w=160:h=90 -c:v h264_vaapi {null}"
-            ),
-        ),
-        ("qsv", format!("{run} {src} -c:v h264_qsv {null}")),
-        ("nvenc", format!("{run} {src} -c:v h264_nvenc {null}")),
-    ];
     let mut out = String::new();
-    for (token, cmd) in cases {
+    for (token, needs_dev, tail) in CASES {
+        let dev = if needs_dev {
+            format!(" {dev}")
+        } else {
+            String::new()
+        };
+        let cmd = format!("{run}{dev} {src} {tail} {null}");
         out.push_str(&format!("{cmd} >/dev/null 2>&1 && echo {token}; "));
     }
     // tonemap_vaapi refuses a frame with no mastering display, so this test
@@ -73,24 +78,26 @@ pub fn script(ffmpeg: &str) -> String {
     out
 }
 
-/// The tokens the probe printed, in `TOKENS` order. Anything else on stdout
-/// is ignored, so a chatty shell cannot invent a capability.
+/// The tokens the probe printed. Anything else on stdout is ignored, so a
+/// chatty shell cannot invent a capability.
 pub fn parse(output: &str) -> Vec<String> {
-    TOKENS
-        .iter()
-        .filter(|token| output.lines().any(|line| line.trim() == **token))
-        .map(|token| token.to_string())
+    tokens()
+        .into_iter()
+        .filter(|token| output.lines().any(|line| line.trim() == *token))
+        .map(str::to_string)
         .collect()
 }
 
 /// The capabilities a job needs, read from the arguments Jellyfin passes.
 ///
-/// The encoder names the accelerator. A 10-bit profile and the tone-mapping
-/// filter name the sub-capabilities that split one GPU generation from the
-/// next. No token comes from the input file: reading it would cost a probe on
-/// the dispatch path, and Jellyfin already states its choice in the arguments.
+/// The encoder names the accelerator and the codec. A 10-bit profile and the
+/// tone-mapping filter name the sub-capabilities that split one GPU generation
+/// from the next. No token comes from the input file: reading it would cost a
+/// probe on the dispatch path, and Jellyfin already states its choice in the
+/// arguments.
 pub fn required(args: &[OsString]) -> Vec<String> {
     let mut accelerator = None;
+    let mut av1 = false;
     let mut ten_bit = false;
     let mut tonemap = false;
     for arg in args {
@@ -100,6 +107,7 @@ pub fn required(args: &[OsString]) -> Vec<String> {
                 accelerator = Some(cap);
             }
         }
+        av1 = av1 || text.starts_with("av1_");
         ten_bit = ten_bit || text.contains("main10") || text.contains("p010");
         tonemap = tonemap || text.contains("tonemap_vaapi");
     }
@@ -107,7 +115,12 @@ pub fn required(args: &[OsString]) -> Vec<String> {
         return Vec::new();
     };
     let mut need = vec![accelerator.to_string()];
-    if accelerator == "vaapi" {
+    // AV1 is a codec, not a profile: an AV1 encoder needs its own token, and
+    // the H.264/HEVC tokens say nothing about it.
+    let av1_token = format!("{accelerator}_av1");
+    if av1 && tokens().iter().any(|token| *token == av1_token) {
+        need.push(av1_token);
+    } else if accelerator == "vaapi" {
         if ten_bit {
             need.push("vaapi_hevc10".to_string());
         }
@@ -133,6 +146,29 @@ mod tests {
         assert_eq!(required(&args(&["-c:v", "h264_qsv"])), vec!["qsv"]);
         assert!(required(&args(&["-c:v", "libx264"])).is_empty());
         assert!(required(&args(&["-c", "copy"])).is_empty());
+        // Software AV1 names no accelerator, so any host can run it.
+        assert!(required(&args(&["-c:v", "libsvtav1"])).is_empty());
+    }
+
+    #[test]
+    fn an_av1_encoder_asks_for_its_own_token() {
+        assert_eq!(
+            required(&args(&["-c:v", "av1_vaapi"])),
+            vec!["vaapi", "vaapi_av1"]
+        );
+        assert_eq!(
+            required(&args(&["-c:v", "av1_qsv"])),
+            vec!["qsv", "qsv_av1"]
+        );
+        assert_eq!(
+            required(&args(&["-c:v", "av1_nvenc"])),
+            vec!["nvenc", "nvenc_av1"]
+        );
+        // A 10-bit hint does not turn an AV1 job into an HEVC one.
+        assert_eq!(
+            required(&args(&["-c:v", "av1_vaapi", "-profile:v", "main10"])),
+            vec!["vaapi", "vaapi_av1"]
+        );
     }
 
     #[test]
@@ -176,7 +212,7 @@ mod tests {
     #[test]
     fn the_script_runs_one_command_per_token() {
         let s = script("ffmpeg");
-        assert!(s.matches("timeout 30").count() >= TOKENS.len());
+        assert!(s.matches("timeout 30").count() > tokens().len());
         assert!(s.ends_with("true"));
         assert!(!s.contains('\n'));
     }

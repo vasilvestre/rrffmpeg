@@ -48,6 +48,7 @@ Each entry points at raw Markdown so a reader gets plain text.
 - [0024 Declared capabilities](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0024-declared-capabilities.md): one token per real driver limit, why libva and ffmpeg cannot answer it, and the one-frame probe that prints the config rows.
 - [0025 Reserved sequence numbers](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0025-sequence-numbers-are-reserved-per-process.md): why concurrent processes shared a journal `seq`, and why a block reservation at open fixes identity without touching the record format.
 - [0026 Exclusive blocks](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0026-a-block-is-exclusive-and-replay-never-moves-the-writer.md): why replaying the journal must not move the writer, and how a full block is renewed.
+- [0027 AV1 is a codec token](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0027-av1-is-a-codec-token.md): why an `av1_vaapi` job needed its own token, and why a UHD 630 or an N100 cannot encode AV1.
 
 ## Optional
 

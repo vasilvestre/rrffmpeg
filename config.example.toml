@@ -66,7 +66,8 @@ concurrency = 2
 # What this worker proved it can do. Run `rrffmpeg capabilities worker` on the
 # client to print the exact line, one frame per token. An empty list accepts
 # any job; every token a job needs must be listed here.
-# Tokens: vaapi, vaapi_hevc, vaapi_hevc10, vaapi_tonemap, vaapi_vpp, qsv, nvenc.
+# Tokens: vaapi, vaapi_hevc, vaapi_hevc10, vaapi_av1, vaapi_tonemap,
+# vaapi_vpp, qsv, qsv_av1, nvenc, nvenc_av1.
 capabilities = ["vaapi", "vaapi_hevc"]
 
 # Skip ssh for this host and talk to `rrffmpeg-agent` instead. Hosts without
