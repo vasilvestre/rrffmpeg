@@ -2,7 +2,7 @@
 //! These are the tests that matter: a shim proves wiring, not fidelity.
 
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 fn have(bin: &str) -> bool {
     Command::new(bin).arg("-version").output().is_ok()
@@ -130,15 +130,22 @@ fn dispatch_overhead_stays_under_50ms() {
     }
     // Warm the page cache so we time the dispatcher, not the disk.
     let _ = rrffmpeg(&["-version"]);
-    let mut worst = std::time::Duration::ZERO;
-    for _ in 0..20 {
+    // ADR 0014 states a p99, and a shared runner preempts about one run in a
+    // hundred. The worst run is still reported.
+    let mut took = Vec::with_capacity(100);
+    for _ in 0..100 {
         let t = Instant::now();
         let out = rrffmpeg(&["-version"]);
-        let took = t.elapsed();
+        took.push(t.elapsed());
         assert!(out.status.success());
-        worst = worst.max(took);
     }
-    assert!(worst.as_millis() < 50, "worst dispatch took {worst:?}");
+    took.sort();
+    let p99 = took[98];
+    let worst = took[99];
+    assert!(
+        p99 < Duration::from_millis(50),
+        "dispatch p99 took {p99:?}, worst {worst:?}"
+    );
 }
 
 #[test]
