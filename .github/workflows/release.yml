@@ -10,18 +10,62 @@ permissions:
 jobs:
   gate:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The semver check compares the tag with the other tags.
+          fetch-depth: 0
 
       # A tag that does not match Cargo.toml ships a binary whose --version
-      # lies about the release it came from.
-      - name: Check the tag matches Cargo.toml
+      # lies about the release it came from. The release body is
+      # docs/releases/<version>.md, so a tag without that file publishes an
+      # empty release page.
+      - name: Check the tag and the release notes
+        id: version
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           test "v$version" = "$GITHUB_REF_NAME" || {
             echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
             exit 1
           }
+          echo "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || {
+            echo "version $version is not MAJOR.MINOR.PATCH" >&2
+            exit 1
+          }
+          notes="docs/releases/$version.md"
+          test -f "$notes" || {
+            echo "$notes is missing: write the release notes before tagging" >&2
+            exit 1
+          }
+          test "$(head -1 "$notes")" = "# $version" || {
+            echo "$notes must start with: # $version" >&2
+            exit 1
+          }
+          previous=$(git tag --list 'v*' | sed 's/^v//' | grep -vx "$version" | sort -V | tail -1)
+          if [ -n "$previous" ]; then
+            newest=$(printf '%s\n%s\n' "$previous" "$version" | sort -V | tail -1)
+            test "$newest" = "$version" || {
+              echo "version $version is lower than the previous tag v$previous" >&2
+              exit 1
+            }
+            bump=patch
+            if [ "${version%.*}" != "${previous%.*}" ]; then bump=minor; fi
+            if [ "${version%%.*}" != "${previous%%.*}" ]; then bump=major; fi
+            echo "bump: $previous -> $version is $bump"
+            # Below 1.0.0 a breaking change is a minor bump; from 1.0.0 it is a
+            # major one. The notes declare it with this heading.
+            if grep -q '^## Breaking change' "$notes"; then
+              wanted=major
+              if [ "${version%%.*}" = 0 ]; then wanted=minor; fi
+              test "$bump" = "$wanted" || {
+                echo "$notes declares a breaking change, so the bump must be $wanted, not $bump" >&2
+                exit 1
+              }
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install ffmpeg
         run: |
@@ -70,4 +114,4 @@ jobs:
           files: |
             rrffmpeg-${{ matrix.target }}.tar.gz
             rrffmpeg-${{ matrix.target }}.tar.gz.sha256
-          generate_release_notes: true
+          body_path: docs/releases/${{ needs.gate.outputs.version }}.md

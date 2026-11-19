@@ -27,6 +27,18 @@ A `v*` tag runs `.github/workflows/release.yml`, which publishes static
 `x86_64` and `aarch64` binaries on the releases page. The install steps live
 in `README.md`.
 
+## Releases
+
+`docs/releases/<version>.md` is the release body published on GitHub. Write it
+before you tag: the gate refuses a tag with no notes file, with a file whose
+first line is not `# <version>`, with a version lower than the newest tag, or
+with a version that is not `MAJOR.MINOR.PATCH`.
+
+The gate also reads the notes to police the semver bump. Below 1.0.0 a
+`## Breaking change` section requires a minor bump; from 1.0.0 it requires a
+major one. Do not keep `generate_release_notes` or a hand-edited release body:
+the next tag overwrites it.
+
 The public page is `docs/index.html`, served by GitHub Pages from the `/docs`
 folder of `main`. Treat it like the decision records: a change that adds or
 alters a config key, a feature or the project status updates the page in the
