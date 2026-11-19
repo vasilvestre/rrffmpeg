@@ -15,6 +15,7 @@ Each entry points at raw Markdown so a reader gets plain text.
 - [Measurer](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/scripts/measure.py): 5 warmup runs, N samples, nearest-rank percentiles, used by both benchmark pages.
 - [Replay harness](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/replay.md): records real Jellyfin invocations and replays them through `rrffmpeg` to catch argument, quoting, stream wiring and exit code regressions.
 - [Example config](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/config.example.toml): a working pair of client and worker hosts.
+- [Release 0.11.0](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/releases/0.11.0.md): `local = true` puts the client's own GPU in placement, so H.264 stays home and AV1 goes to the worker that can encode it.
 - [Release 0.10.0](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/releases/0.10.0.md): `rrffmpeg jellyfin` reads Jellyfin's `encoding.xml`, compares each transcode setting with the declared capabilities, and says which hosts can serve it.
 - [Release 0.9.1](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/releases/0.9.1.md): a host no longer reads as full while slots are free, and the config rejects unknown keys, duplicate host names and zero concurrency.
 - [Release 0.9.0](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/releases/0.9.0.md): AV1 gets its own capability token per encoder family, so an AV1 job no longer lands on a host that only encodes H.264.
