@@ -256,19 +256,20 @@ pub fn rows(settings: &Settings, workers: &[Worker], probe_device: &str) -> Vec<
         }
 
         if settings.flag("EnableTonemapping", false) {
-            if family == "vaapi" {
+            // Jellyfin emits `tonemap_vaapi` only with VPP on. Otherwise it
+            // builds `tonemap_opencl`, and the probe proves no OpenCL filter,
+            // so no host can be called `ok` on the strength of one.
+            if family == "vaapi" && settings.flag("EnableVppTonemapping", false) {
                 let mut tokens = need(&["-vf", "tonemap_vaapi=format=nv12", "-c:v", "h264_vaapi"]);
-                if settings.flag("EnableVppTonemapping", false) {
-                    // `required()` cannot see `scale_vaapi`; the probe has a
-                    // token for the VPP filter itself.
-                    tokens.push("vaapi_vpp".into());
-                }
+                // required() cannot see the VAAPI scale filter, and the probe
+                // has a token for that filter itself.
+                tokens.push("vaapi_vpp".into());
                 out.push(row(workers, "EnableTonemapping", "true", tokens));
             } else {
                 out.push(unknown(
                     "EnableTonemapping",
                     "true",
-                    "Jellyfin builds tonemap_opencl for this family, and the probe tests tonemap_vaapi only",
+                    "Jellyfin builds tonemap_opencl here, and the probe tests tonemap_vaapi only: set EnableVppTonemapping to true, or prove OpenCL by hand",
                 ));
             }
         }
@@ -604,7 +605,8 @@ mod tests {
         let s = settings(&vaapi_xml(
             "<AllowHevcEncoding>true</AllowHevcEncoding>\
              <EnableDecodingColorDepth10Hevc>true</EnableDecodingColorDepth10Hevc>\
-             <EnableTonemapping>true</EnableTonemapping>",
+             <EnableTonemapping>true</EnableTonemapping>\
+             <EnableVppTonemapping>true</EnableVppTonemapping>",
         ));
         let rows = super::rows(
             &s,
@@ -663,6 +665,42 @@ mod tests {
             .unwrap();
         assert!(row.needs.contains("vaapi_vpp"));
         assert_eq!(row.verdict, "partial");
+    }
+
+    /// The old green rested on a filter the client never emits: with VPP off,
+    /// Jellyfin builds `tonemap_opencl` whatever the probe proved.
+    #[test]
+    fn a_vaapi_tonemap_without_vpp_is_not_ok() {
+        let s = settings(&vaapi_xml("<EnableTonemapping>true</EnableTonemapping>"));
+        let rows = super::rows(
+            &s,
+            &[worker("n100", &["vaapi", "vaapi_hevc", "vaapi_tonemap"])],
+            capabilities::DEFAULT_VAAPI_DEVICE,
+        );
+        let tone = rows
+            .iter()
+            .find(|r| r.setting == "EnableTonemapping")
+            .unwrap();
+        assert_eq!(tone.verdict, "unknown");
+        assert_eq!(tone.needs, "-");
+        assert!(tone.detail.contains("tonemap_opencl"), "{}", tone.detail);
+
+        // With VPP on, Jellyfin emits tonemap_vaapi, and the token proves it.
+        let vpp = settings(&vaapi_xml(
+            "<EnableTonemapping>true</EnableTonemapping>\
+             <EnableVppTonemapping>true</EnableVppTonemapping>",
+        ));
+        let rows = super::rows(
+            &vpp,
+            &[worker("n100", &["vaapi", "vaapi_tonemap", "vaapi_vpp"])],
+            capabilities::DEFAULT_VAAPI_DEVICE,
+        );
+        let tone = rows
+            .iter()
+            .find(|r| r.setting == "EnableTonemapping")
+            .unwrap();
+        assert_eq!(tone.verdict, "ok");
+        assert!(tone.needs.contains("vaapi_tonemap"));
     }
 
     #[test]
