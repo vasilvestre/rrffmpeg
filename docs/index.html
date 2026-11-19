@@ -309,13 +309,14 @@ keep a daemon running, or must not run arbitrary argv. Pick the agent when the
 client sends bursts of short calls (Jellyfin startup probes, seeks, ffprobe),
 when the link has real latency, or when a killed client must not leave a
 transcode running on the worker. Measure first: time
-<code>ffprobe -version</code> through the dispatcher. Under 50 ms at p99, SSH
-is enough.</p>
+<code>ffprobe -version</code> through the dispatcher. Under 50 ms at p99 over SSH,
+or 35 ms over the agent, it is enough.</p>
 
 <p>Measured on one loopback box with ffmpeg 8.0.1: a full dispatch at p99 is
 32.95 ms, of which ffmpeg is 27.8 ms, the dispatcher 3.8 ms and the TLS
-transport 0.4 ms. Over SSH with connection persistence the same dispatch is
-37.94 ms p50 and 46.94 ms p99; with persistence off it is 155.60 ms p50.
+transport 0.4 ms. Over a LAN with connection persistence, SSH is 37.94 ms p50
+and 46.94 ms p99, the agent 30.95 ms p50 and 33.92 ms p99; with persistence off
+SSH is 155.60 ms p50.
 The journal write is asynchronous and dispatch never reads the journal, so its
 size stays off the dispatch path. The harness and the raw runs live in
 <code>docs/latency.md</code>.</p>
