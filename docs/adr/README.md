@@ -38,5 +38,6 @@ ADR-NNNN` and add the new record.
 | [0026](0026-a-block-is-exclusive-and-replay-never-moves-the-writer.md) | A journal block is exclusive, and replay never moves the writer | Accepted |
 | [0027](0027-av1-is-a-codec-token.md) | AV1 gets its own codec token per encoder family | Accepted |
 | [0028](0028-jellyfin-settings-audit.md) | The Jellyfin audit reuses the placement rule, and reads `encoding.xml` | Accepted |
+| [0029](0029-a-local-host-takes-part-in-placement.md) | `local = true` puts the client's own GPU in the placement decision | Accepted |
 
 Records dated 2026-11-17 to 2026-11-19.

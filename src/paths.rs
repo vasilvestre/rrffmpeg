@@ -90,6 +90,7 @@ mod tests {
 
     fn host(paths: Vec<(&str, &str)>) -> Host {
         Host {
+            local: false,
             name: "worker".into(),
             concurrency: 1,
             capabilities: vec![],

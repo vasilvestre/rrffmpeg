@@ -194,6 +194,7 @@ daemon on the worker.
 | Where the dispatcher runs | Configuration | Reason |
 |---|---|---|
 | The box has the GPU | no `[[hosts]]` | Local mode: no state, no thread, no disk |
+| The box has a GPU and a worker has a better one | a `[[hosts]]` entry with `local = true` | Placement sees both, so each job goes where it runs best |
 | Client without a GPU, LAN, a few jobs per hour | SSH | Nothing to install, and the cost is invisible at that rate |
 | Client that sends bursts of short calls | Agent, or SSH with persistence | One TLS round trip, and no ssh process per call; persistence closes most of the SSH gap |
 | Link with high latency or loss | Agent | One round trip for TLS 1.3, against several for SSH key exchange and auth |
@@ -243,6 +244,15 @@ Rules that apply once a worker is configured:
    its own private `state_dir` sees a worker that is always free and a weight
    that means nothing. `client_weight` only applies while two clients wait:
    alone, a client keeps taking every slot.
+8. A client that has its own GPU declares it as a local host, `local = true`,
+   and placement then treats it like any other worker. Give it the tokens it
+   proved and give the remote worker only what it alone can do: an N100 listed
+   with `vaapi_av1` and a local host with `vaapi`, `vaapi_hevc` and
+   `vaapi_hevc10` sends AV1 jobs out and keeps the rest home. A local host
+   takes no `paths`, no `ssh_args` and no `*_bin`: it runs `local_ffmpeg` and
+   `local_ffprobe` on the client's own paths, and `rrffmpeg capabilities <name>`
+   probes it without leaving the machine. Keep local mode (no `[[hosts]]`) when
+   the client never sends anything out: it needs no state and no thread.
 
 ```toml
 client_name = "client"

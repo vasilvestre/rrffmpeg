@@ -284,6 +284,20 @@ relayed byte count per job on the agent path.</p>
   </tbody>
 </table>
 
+<h3>A local host</h3>
+
+<p>A client that has its own GPU can take part in placement. Add a
+<code>[[hosts]]</code> entry with <code>local = true</code> and the tokens that
+GPU proved: jobs it can run stay on the client, and the remote worker keeps the
+ones only it can do, such as AV1 encode.</p>
+
+<table>
+  <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>local</code></td><td><code>false</code></td><td>Run this host's jobs on the client with <code>local_ffmpeg</code> and <code>local_ffprobe</code>. <code>name</code> becomes a label for the journal, the slot locks and <code>--host</code>. The client's own paths apply, so <code>paths</code> must stay empty.</td></tr>
+  </tbody>
+</table>
+
 <h3>One host</h3>
 
 <table>
@@ -405,6 +419,11 @@ processes, and a replay test driven by invocations recorded from a real
 Jellyfin server. A job that fails before the worker starts ffmpeg is retried
 once on another host (ADR 0013). A job whose client dies is not replayed:
 nobody is left to read its output.</p>
+
+<p>A client with its own GPU can stay in the placement decision: a host with
+<code>local = true</code> runs its jobs here, and the scheduler sends the rest to
+a worker that can do them (ADR 0029). The local path costs 0.5 ms more than a
+direct ffmpeg start, measured in <code>docs/latency.md</code>.</p>
 
 <p><code>rrffmpeg jellyfin</code> compares Jellyfin's transcode settings with
 the declared capabilities and reports what placement can serve, including a

@@ -9,8 +9,8 @@ use rrffmpeg::janitor::Janitor;
 use rrffmpeg::locks::LockDir;
 use rrffmpeg::scheduler::Scheduler;
 use rrffmpeg::state::{Event, Journal};
-use rrffmpeg::transport::{Persist, Router, Ssh, Transport};
-use rrffmpeg::{Error, Job, Program, Result, capabilities, config::Config, jellyfin, paths};
+use rrffmpeg::transport::{Local, Persist, Router, Ssh, Transport};
+use rrffmpeg::{Error, Host, Job, Program, Result, capabilities, config::Config, jellyfin, paths};
 use std::ffi::OsString;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
@@ -94,6 +94,11 @@ fn run() -> Result<i32> {
     let transport: Arc<dyn Transport> = Arc::new(Router {
         ssh: ssh_transport(&config)?,
         agent,
+        local: if config.hosts.iter().any(|host| host.local) {
+            Some(local_transport(&config)?)
+        } else {
+            None
+        },
     });
     let _janitor = Janitor::spawn(
         scheduler.clone(),
@@ -297,7 +302,7 @@ fn capabilities_command(config: &Config, args: &[OsString]) -> Result<i32> {
             continue;
         }
         probed += 1;
-        match ssh.probe_capabilities(host, &device) {
+        match probe_capabilities(config, &ssh, host, &device) {
             Ok(tokens) => {
                 let list: Vec<String> = tokens.iter().map(|t| format!("\"{t}\"")).collect();
                 println!("# {}\ncapabilities = [{}]", host.name, list.join(", "));
@@ -368,7 +373,7 @@ fn jellyfin_command(config: &Config, args: &[OsString]) -> Result<i32> {
             if !workers.iter().any(|worker| worker.name == host.name) {
                 continue;
             }
-            match ssh.probe_capabilities(host, &device) {
+            match probe_capabilities(config, &ssh, host, &device) {
                 Ok(tokens) => {
                     if let Some(worker) = workers.iter_mut().find(|w| w.name == host.name) {
                         worker.tokens = tokens;
@@ -389,6 +394,29 @@ fn jellyfin_command(config: &Config, args: &[OsString]) -> Result<i32> {
     }
     let broken = rows.iter().any(|row| row.verdict == "broken");
     Ok(if failed || broken { 1 } else { 0 })
+}
+
+/// The client's own machine, built only when a host declares `local = true`.
+fn local_transport(config: &Config) -> Result<Local> {
+    Local::new(
+        config.local_ffmpeg.clone(),
+        config.local_ffprobe.clone(),
+        config.state_dir.join("pid"),
+        config.local_env.clone(),
+    )
+}
+
+/// One capability probe, run on the machine itself when the host is local.
+fn probe_capabilities(
+    config: &Config,
+    ssh: &Ssh,
+    host: &Host,
+    device: &str,
+) -> Result<Vec<String>> {
+    if host.local {
+        return local_transport(config)?.probe_capabilities(device);
+    }
+    ssh.probe_capabilities(host, device)
 }
 
 fn ssh_transport(config: &Config) -> Result<Ssh> {
@@ -583,6 +611,7 @@ mod tests {
             name: name.into(),
             concurrency: 1,
             capabilities: Vec::new(),
+            local: false,
             ffmpeg_bin: None,
             ffprobe_bin: None,
             agent_addr: None,

@@ -1002,6 +1002,7 @@ mod tests {
 
     fn host(addr: &str, bin: &str) -> Host {
         Host {
+            local: false,
             name: "worker".into(),
             concurrency: 1,
             capabilities: vec![],

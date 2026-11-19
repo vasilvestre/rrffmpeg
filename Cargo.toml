@@ -65,6 +65,12 @@ harness = false
 test = false
 
 [[bench]]
+name = "local"
+path = "benches/local.rs"
+harness = false
+test = false
+
+[[bench]]
 name = "progress"
 path = "benches/progress.rs"
 harness = false

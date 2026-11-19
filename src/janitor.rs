@@ -237,6 +237,7 @@ mod tests {
 
     fn host(name: &str) -> Host {
         Host {
+            local: false,
             name: name.to_string(),
             concurrency: 1,
             capabilities: Vec::new(),

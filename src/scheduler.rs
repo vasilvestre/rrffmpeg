@@ -273,6 +273,7 @@ mod tests {
 
     fn host(name: &str, concurrency: usize, capabilities: &[&str]) -> Host {
         Host {
+            local: false,
             name: name.to_string(),
             concurrency,
             capabilities: capabilities.iter().map(|c| c.to_string()).collect(),

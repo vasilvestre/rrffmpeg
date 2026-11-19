@@ -298,6 +298,51 @@ dynamically linked program starts in 340 us here against 240 us static, so the
 release binaries, which are `musl` static, start 100 us faster than these `gnu`
 measurements show.
 
+## A job on a local host
+
+A `[[hosts]]` entry with `local = true` runs the job on the client itself. It is
+the only transport with no network, so what is left is the dispatcher's own
+work. `benches/local.rs` measures it, with `/bin/true` in place of ffmpeg:
+
+```bash
+cargo bench --bench local
+```
+
+```text
+spawn_true               632 us   one bare fork, exec and wait: the floor
+local_spawn              636 us   one job through the local transport
+journal_open_close        50 us   what a one-shot process pays to record it
+journal_open_write_close  57 us   the same, with the Started and Finished events
+```
+
+The local transport costs **4 us over a bare spawn**: two pipes, one relay
+thread, one pid file. It has nothing left to optimize.
+
+The phases of a whole dispatch come from a temporary instrumented build of the
+same revision, three runs each, load 1.8 on 16 threads:
+
+```text
+config load                      105 us
+journal open + janitor spawn     135 us
+slot acquire                      30 us
+journal append (Started)           9 us
+spawn, pid file, relay setup     200 us
+wait for the child            30 600 us   ffmpeg -version, unchanged
+journal close after the job       50 us
+```
+
+So a job on a local host costs about **0.5 ms more than the same job exec'd
+directly**, which is under 2 percent of a 30 ms ffmpeg start. The one structural
+cost is the fork: local mode replaces the process with `exec`, while a local
+host must fork, wait and record, because it owes a `Finished` event to the
+journal.
+
+A wall-clock comparison of the two modes on this box is not usable: the paired
+delta over 150 runs moves between -4 ms and +6 ms, because process start and
+scheduler placement on a shared runner move more than the effect being
+measured. The per-phase numbers above are the ones to trust, and they say the
+local path is already at the floor.
+
 ## Journal growth
 
 The client opens the journal and replays it on every dispatch, so a long

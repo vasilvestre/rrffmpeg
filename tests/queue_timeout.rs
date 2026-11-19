@@ -30,6 +30,7 @@ fn worker() -> Host {
         name: "worker".into(),
         concurrency: 1,
         capabilities: Vec::new(),
+        local: false,
         ffmpeg_bin: None,
         ffprobe_bin: None,
         agent_addr: None,

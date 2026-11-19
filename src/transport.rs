@@ -6,8 +6,11 @@
 //! single-quoted, so spaces, `$`, backticks, semicolons and newlines reach the
 //! worker as literal bytes.
 
+use crate::config::Program;
 use crate::{Error, Host, Job, Result};
 use std::io::{Read, Write};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -314,10 +317,209 @@ impl Transport for Ssh {
     }
 }
 
-/// Picks a transport per host: `agent_addr` means the daemon, else ssh.
+/// The client's own machine as a worker. The job runs here through the same
+/// relay as over ssh, so Jellyfin gets the progress lines either way, and the
+/// scheduler places it like any other host.
+#[derive(Debug)]
+pub struct Local {
+    pub ffmpeg: PathBuf,
+    pub ffprobe: PathBuf,
+    /// Per-job pid files, on this machine. The janitor reads them like the
+    /// worker's, so a job left by a killed dispatcher is still reaped.
+    pub pid_dir: PathBuf,
+    /// `local_env`; a host's own `env` goes on top.
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+impl Local {
+    /// Refuses a local tool that is this program. `local_ffmpeg` is often a
+    /// symlink next to the Jellyfin one, and pointing it at rrffmpeg would
+    /// make every local job call itself, forking until the box dies.
+    pub fn new(
+        ffmpeg: PathBuf,
+        ffprobe: PathBuf,
+        pid_dir: PathBuf,
+        env: std::collections::BTreeMap<String, String>,
+    ) -> Result<Local> {
+        for bin in [&ffmpeg, &ffprobe] {
+            if resolves_to_this_program(bin) {
+                return Err(Error::Config(format!(
+                    "{} is this program: point local_ffmpeg and local_ffprobe at the real ffmpeg, or a host with `local = true` would call itself forever",
+                    bin.display()
+                )));
+            }
+        }
+        Ok(Local {
+            ffmpeg,
+            ffprobe,
+            pid_dir,
+            env,
+        })
+    }
+
+    fn binary(&self, program: Program) -> &PathBuf {
+        match program {
+            Program::Ffmpeg => &self.ffmpeg,
+            Program::Ffprobe => &self.ffprobe,
+        }
+    }
+
+    fn pid_file(&self, job_id: &str) -> PathBuf {
+        self.pid_dir.join(format!("{job_id}.pid"))
+    }
+
+    /// The same one-frame probe as the ssh transport, run here.
+    pub fn probe_capabilities(&self, device: &str) -> Result<Vec<String>> {
+        let script = crate::capabilities::script(&self.ffmpeg.to_string_lossy(), device);
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .envs(&self.env)
+            .output()
+            .map_err(|e| Error::Io(e, "running the capability probe".into()))?;
+        if !out.status.success() {
+            return Err(Error::Transport(format!(
+                "capability probe on this host failed: {}",
+                out.status
+            )));
+        }
+        Ok(crate::capabilities::parse(&String::from_utf8_lossy(
+            &out.stdout,
+        )))
+    }
+}
+
+impl Transport for Local {
+    fn run(&self, host: &Host, job: &Job, stderr_as_stdout: bool) -> Result<i32> {
+        let bin = self.binary(job.program);
+        let mut command = Command::new(bin);
+        command
+            .args(&job.args)
+            .envs(&self.env)
+            .envs(&host.env)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            // Same wiring as ssh: only the tapped stream is piped.
+            .stderr(Stdio::piped());
+        // Jellyfin cancels a transcode by killing the process it started, which
+        // is this one. Without this, the ffmpeg child outlives the dispatcher,
+        // keeps writing into the same output directory and holds the GPU.
+        // Local mode never had that problem: it execs in place.
+        // SAFETY: the closure runs in the forked child before exec, where only
+        // async-signal-safe calls are allowed. prctl is one, and it returns a
+        // value this ignores rather than touching any shared state.
+        unsafe {
+            command.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                Ok(())
+            });
+        }
+        let mut child = command
+            .spawn()
+            .map_err(|e| Error::Io(e, format!("running {}", bin.display())))?;
+
+        // Written before the job can be forgotten. The janitor reaps a job
+        // whose pid file is missing, so a job that runs without one looks dead
+        // while it still encodes. A kill keeps that from happening.
+        let pid_file = self.pid_file(&job.id);
+        if let Err(e) = std::fs::create_dir_all(&self.pid_dir)
+            .and_then(|()| std::fs::write(&pid_file, child.id().to_string()))
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::Io(e, format!("pid file {}", pid_file.display())));
+        }
+
+        let relay = child.stderr.take().map(|err| {
+            if stderr_as_stdout {
+                relay(err, std::io::stdout())
+            } else {
+                relay(err, std::io::stderr())
+            }
+        });
+        let status = child.wait();
+        if let Some(relay) = relay {
+            let _ = relay.join();
+        }
+        let _ = std::fs::remove_file(&pid_file);
+        let status = status.map_err(|e| Error::Io(e, format!("waiting on {}", bin.display())))?;
+        // A signal-terminated child has no code; report it the way a shell
+        // does, 128 plus the signal, instead of pretending it was a clean 0.
+        Ok(status
+            .code()
+            .unwrap_or_else(|| 128 + status.signal().unwrap_or(1)))
+    }
+
+    fn probe(&self, host: &Host) -> bool {
+        // The same env as a job: a wrapper that needs it would otherwise mark
+        // a working host down.
+        Command::new(&self.ffmpeg)
+            .arg("-version")
+            .envs(&self.env)
+            .envs(&host.env)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    fn job_alive(&self, _host: &Host, job_id: &str) -> bool {
+        let Ok(text) = std::fs::read_to_string(self.pid_file(job_id)) else {
+            // No pid file: the job is gone, or never wrote one.
+            return false;
+        };
+        let Ok(pid) = text.trim().parse::<i32>() else {
+            return false;
+        };
+        // Signal 0 asks the kernel whether the process exists.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+}
+
+/// Does this command resolve to the running program? `local_ffmpeg` is a bare
+/// name in most configs, so a PATH search is what catches the symlink case.
+fn resolves_to_this_program(bin: &std::path::Path) -> bool {
+    let Ok(me) = std::env::current_exe() else {
+        return false;
+    };
+    let candidate = if bin.components().count() > 1 {
+        Some(bin.to_path_buf())
+    } else {
+        // What execvp picks: the first entry that is an executable file. Plain
+        // `exists` would stop on a file the kernel refuses, and the job would
+        // then reach the real one, which may be this program.
+        std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path)
+                .map(|dir| dir.join(bin))
+                .find(|path| is_executable(path))
+        })
+    };
+    candidate.is_some_and(|path| same_file(&path, &me))
+}
+
+fn is_executable(path: &std::path::Path) -> bool {
+    std::fs::metadata(path)
+        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+/// Identity by inode, so a hardlink or a bind mount of this program counts too.
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+/// Picks a transport per host: `local` runs here, `agent_addr` means the
+/// daemon, else ssh.
 pub struct Router {
     pub ssh: Ssh,
     pub agent: Option<crate::agent::Agent>,
+    /// Built only when a host declares `local = true`.
+    pub local: Option<Local>,
 }
 
 impl Router {
@@ -329,10 +531,22 @@ impl Router {
             ))
         })
     }
+
+    fn local_transport(&self, host: &Host) -> Result<&Local> {
+        self.local.as_ref().ok_or_else(|| {
+            Error::Config(format!(
+                "host {} is local but no local transport was built",
+                host.name
+            ))
+        })
+    }
 }
 
 impl Transport for Router {
     fn run(&self, host: &Host, job: &Job, stderr_as_stdout: bool) -> Result<i32> {
+        if host.local {
+            return self.local_transport(host)?.run(host, job, stderr_as_stdout);
+        }
         match host.agent_addr {
             Some(_) => self.agent(host)?.run(host, job, stderr_as_stdout),
             None => self.ssh.run(host, job, stderr_as_stdout),
@@ -340,6 +554,12 @@ impl Transport for Router {
     }
 
     fn probe(&self, host: &Host) -> bool {
+        if host.local {
+            return self
+                .local_transport(host)
+                .map(|local| local.probe(host))
+                .unwrap_or(false);
+        }
         match host.agent_addr {
             Some(_) => self.agent(host).map(|a| a.probe(host)).unwrap_or(false),
             None => self.ssh.probe(host),
@@ -347,6 +567,12 @@ impl Transport for Router {
     }
 
     fn job_alive(&self, host: &Host, job_id: &str) -> bool {
+        if host.local {
+            return self
+                .local_transport(host)
+                .map(|local| local.job_alive(host, job_id))
+                .unwrap_or(false);
+        }
         match host.agent_addr {
             Some(_) => self
                 .agent(host)
@@ -421,6 +647,7 @@ mod tests {
 
     fn host() -> Host {
         Host {
+            local: false,
             name: "worker".into(),
             concurrency: 1,
             capabilities: vec![],
@@ -854,6 +1081,7 @@ mod tests {
         let router = Router {
             ssh: ssh(dir.join("unused-ssh"), &dir),
             agent: None,
+            local: None,
         };
 
         // No agent is configured. A host with agent_addr still takes the agent
@@ -871,10 +1099,223 @@ mod tests {
         let ssh_router = Router {
             ssh: ssh(fake_exit_ssh(&dir, &argv, 0), &dir),
             agent: None,
+            local: None,
         };
         assert_eq!(
             ssh_router.run(&host(), &job(&[]), false).expect("ssh path"),
             0
         );
+    }
+
+    #[test]
+    fn router_has_a_local_arm() {
+        let dir = fixture("router-local");
+        let _serial = crate::exclusive();
+        let marker = dir.join("marker");
+        let bin = dir.join("local-ffmpeg");
+        executable(
+            &bin,
+            &format!("#!/bin/sh\necho ran \"$@\" > '{}'\n", marker.display()),
+        );
+        let local = Local::new(
+            bin,
+            dir.join("local-ffprobe"),
+            dir.join("pid"),
+            std::collections::BTreeMap::new(),
+        )
+        .expect("local transport");
+        let router = Router {
+            ssh: ssh(dir.join("unused-ssh"), &dir),
+            agent: None,
+            local: Some(local),
+        };
+        let mut here = host();
+        here.local = true;
+
+        assert_eq!(
+            router
+                .run(&here, &job(&["-i", "movie.mkv"]), false)
+                .unwrap(),
+            0
+        );
+        let recorded = std::fs::read_to_string(&marker).expect("the local ffmpeg ran");
+        assert_eq!(recorded.trim(), "ran -i movie.mkv");
+        // The probe answers for the binary, and the pid file is gone again.
+        let pid_file = dir.join("pid").join("job1.pid");
+        assert!(!pid_file.exists());
+    }
+
+    #[test]
+    fn a_local_job_gets_local_env_then_the_host_env() {
+        let dir = fixture("local-env");
+        let _serial = crate::exclusive();
+        let out = dir.join("env");
+        let bin = dir.join("local-ffmpeg");
+        executable(
+            &bin,
+            &format!(
+                "#!/bin/sh\nprintf '%s|%s' \"$FOO\" \"$BAR\" > '{}'\n",
+                out.display()
+            ),
+        );
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("FOO".to_string(), "a".to_string());
+        env.insert("BAR".to_string(), "b".to_string());
+        let local = Local::new(bin, dir.join("p"), dir.join("pid"), env).expect("local");
+        let mut here = host();
+        here.local = true;
+        here.env.insert("BAR".to_string(), "c".to_string());
+
+        local.run(&here, &job(&[]), false).expect("local run");
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "a|c");
+    }
+
+    #[test]
+    fn a_signal_terminated_local_job_reports_128_plus_the_signal() {
+        let dir = fixture("local-signal");
+        let _serial = crate::exclusive();
+        let bin = dir.join("local-ffmpeg");
+        executable(&bin, "#!/bin/sh\nkill -TERM $$\n");
+        let local =
+            Local::new(bin, dir.join("p"), dir.join("pid"), Default::default()).expect("local");
+        assert_eq!(local.run(&host(), &job(&[]), false).unwrap(), 143);
+    }
+
+    #[test]
+    fn a_local_pid_file_says_whether_the_job_still_runs() {
+        let dir = fixture("local-alive");
+        let _serial = crate::exclusive();
+        let local = Local::new(
+            dir.join("local-ffmpeg"),
+            dir.join("p"),
+            dir.join("pid"),
+            Default::default(),
+        )
+        .expect("local");
+        std::fs::create_dir_all(dir.join("pid")).expect("pid dir");
+
+        assert!(!local.job_alive(&host(), "missing"));
+
+        std::fs::write(
+            dir.join("pid").join("mine.pid"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        assert!(local.job_alive(&host(), "mine"));
+
+        // A pid the kernel cannot have handed out.
+        std::fs::write(dir.join("pid").join("gone.pid"), "2147483647").unwrap();
+        assert!(!local.job_alive(&host(), "gone"));
+
+        std::fs::write(dir.join("pid").join("junk.pid"), "not a pid").unwrap();
+        assert!(!local.job_alive(&host(), "junk"));
+    }
+
+    #[test]
+    fn a_local_tool_that_is_this_program_is_refused() {
+        let _serial = crate::exclusive();
+        let me = std::env::current_exe().expect("current exe");
+        let err = Local::new(
+            me.clone(),
+            PathBuf::from("ffprobe"),
+            PathBuf::from("pid"),
+            Default::default(),
+        )
+        .expect_err("this program must be refused");
+        assert!(matches!(err, Error::Config(_)), "{err}");
+        assert!(format!("{err}").contains("call itself"));
+    }
+
+    #[test]
+    fn the_local_capability_probe_parses_the_script_output() {
+        let dir = fixture("local-caps");
+        let _serial = crate::exclusive();
+        let bin = dir.join("local-ffmpeg");
+        // The script runs the binary once per case, so printing one token per
+        // run still gives each token once after the filter.
+        executable(
+            &bin,
+            "#!/bin/sh\ncase \"$*\" in *h264_vaapi*) exit 0;; *) exit 1;; esac\n",
+        );
+        let local =
+            Local::new(bin, dir.join("p"), dir.join("pid"), Default::default()).expect("local");
+        let tokens = local
+            .probe_capabilities(crate::capabilities::DEFAULT_VAAPI_DEVICE)
+            .expect("probe");
+        // The probe prints a token when the encoder's exit status is 0, so a
+        // fake that only accepts h264_vaapi proves the parse keeps order and
+        // drops nothing it should have seen.
+        assert_eq!(tokens, vec!["vaapi".to_string(), "vaapi_vpp".to_string()]);
+    }
+
+    #[test]
+    fn a_local_probe_without_the_binary_reports_no_token() {
+        let dir = fixture("local-missing");
+        let _serial = crate::exclusive();
+        let local = Local::new(
+            dir.join("no-such-ffmpeg"),
+            dir.join("p"),
+            dir.join("pid"),
+            Default::default(),
+        )
+        .expect("local");
+        assert!(!local.probe(&host()));
+        // The script ends with `true`, so a missing binary yields no token
+        // instead of a failing probe: the same answer ssh gives.
+        assert!(
+            local
+                .probe_capabilities(crate::capabilities::DEFAULT_VAAPI_DEVICE)
+                .expect("probe runs")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_hardlink_to_this_program_is_still_this_program() {
+        let _serial = crate::exclusive();
+        let exe = std::env::current_exe().expect("exe");
+        // Beside the test binary: /tmp is often another filesystem, where a
+        // hardlink is refused.
+        let dir = exe
+            .parent()
+            .expect("parent")
+            .join(format!("self-hardlink-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let link = dir.join("ffmpeg");
+        std::fs::hard_link(&exe, &link).expect("hardlink");
+        assert!(resolves_to_this_program(&link));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_path_entry_that_cannot_run_is_skipped() {
+        let _serial = crate::exclusive();
+        let exe = std::env::current_exe().expect("exe");
+        let base = exe
+            .parent()
+            .expect("parent")
+            .join(format!("self-path-{}", std::process::id()));
+        let dead = base.join("dead");
+        std::fs::create_dir_all(&dead).expect("dir");
+        std::fs::write(dead.join("ffmpeg"), "not executable").expect("write");
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).expect("dir");
+        std::fs::hard_link(&exe, real.join("ffmpeg")).expect("hardlink");
+        let old = std::env::var_os("PATH");
+        // SAFETY: guarded by the crate-wide test lock, so no other test reads
+        // or writes the environment while this runs.
+        unsafe {
+            std::env::set_var("PATH", format!("{}:{}", dead.display(), real.display()));
+        }
+        let found = resolves_to_this_program(std::path::Path::new("ffmpeg"));
+        // SAFETY: same lock, restored before the assertion.
+        unsafe {
+            match old {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(found, "the guard stopped on a file the kernel would skip");
     }
 }

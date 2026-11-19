@@ -74,6 +74,16 @@ capabilities = ["vaapi", "vaapi_hevc"]
 # this line keep using ssh, which needs nothing installed on the worker.
 # agent_addr = "worker:9876"
 
+# Run the jobs on this machine instead of a worker. The client's own GPU then
+# takes part in placement, so a worker can be reserved for what only it does:
+# declare the local GPU here and the AV1 host only with `vaapi_av1`, and AV1
+# jobs go to the worker while everything else stays home. The name is then
+# only a label for the journal, the slot locks and `--host`. A local host
+# takes no paths, no ssh_args and no *_bin: it runs local_ffmpeg and
+# local_ffprobe on the client's own paths. One config takes one local host,
+# because a machine has one set of slots.
+# local = true
+
 # Extra ssh arguments for this host only, appended after the global list. This
 # is where a dedicated key goes, so the worker shim only has to set the env.
 # ssh_args = ["-i", "/home/alice/.ssh/worker"]

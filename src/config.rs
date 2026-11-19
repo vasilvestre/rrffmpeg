@@ -106,6 +106,11 @@ pub struct Host {
     /// Advertised accelerators: `vaapi`, `nvenc`, `qsv`. Empty accepts any job.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Run the jobs on this machine with `local_ffmpeg` and `local_ffprobe`,
+    /// so the client's own GPU takes part in placement. `name` is then only a
+    /// label: the journal, the locks and `--host` use it.
+    #[serde(default)]
+    pub local: bool,
     /// Remote ffmpeg command. Defaults to `ffmpeg` from the worker PATH; point
     /// it at a wrapper that sets the OpenCL environment.
     #[serde(default)]
@@ -223,6 +228,7 @@ impl Config {
     pub fn from_toml(text: &str) -> Result<Config> {
         let config: Config = toml::from_str(text).map_err(|e| Error::Config(e.to_string()))?;
         let mut seen = std::collections::HashSet::new();
+        let mut local_seen: Option<&str> = None;
         for host in &config.hosts {
             if host.concurrency == 0 {
                 return Err(Error::Config(format!(
@@ -232,6 +238,42 @@ impl Config {
             }
             if !seen.insert(host.name.as_str()) {
                 return Err(Error::Config(format!("duplicate host name {}", host.name)));
+            }
+            if host.local {
+                // Each of these would be silently ignored, so refuse instead.
+                if host.agent_addr.is_some() {
+                    return Err(Error::Config(format!(
+                        "host {}: local and agent_addr exclude each other",
+                        host.name
+                    )));
+                }
+                if !host.paths.is_empty() {
+                    return Err(Error::Config(format!(
+                        "host {}: a local host reads the client's own paths, so it needs no path map",
+                        host.name
+                    )));
+                }
+                if host.ffmpeg_bin.is_some() || host.ffprobe_bin.is_some() {
+                    return Err(Error::Config(format!(
+                        "host {}: a local host runs local_ffmpeg and local_ffprobe",
+                        host.name
+                    )));
+                }
+                if !host.ssh_args.is_empty() {
+                    return Err(Error::Config(format!(
+                        "host {}: a local host takes no ssh_args",
+                        host.name
+                    )));
+                }
+                // Slots are exclusive per host name, so two local entries would
+                // each allow `concurrency` jobs on one GPU.
+                if let Some(first) = local_seen {
+                    return Err(Error::Config(format!(
+                        "host {}: {first} already runs the jobs here, and one machine has one set of slots",
+                        host.name
+                    )));
+                }
+                local_seen = Some(&host.name);
             }
         }
         Ok(config)
@@ -282,6 +324,18 @@ to = "/home/bob/media"
         assert_eq!(cfg.hosts[0].concurrency, 2);
         assert_eq!(cfg.hosts[0].capabilities, vec!["vaapi".to_string()]);
         assert_eq!(cfg.hosts[0].paths[0].to, PathBuf::from("/home/bob/media"));
+    }
+
+    #[test]
+    fn a_second_local_host_is_refused() {
+        let err = Config::from_toml(
+            "[[hosts]]\nname = \"a\"\nlocal = true\n\n[[hosts]]\nname = \"b\"\nlocal = true\n",
+        )
+        .expect_err("two local hosts");
+        assert!(
+            matches!(&err, Error::Config(text) if text.contains("one set of slots")),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -389,6 +443,47 @@ OCL_ICD_VENDORS = "/opt/intel/opencl"
         let err =
             Config::from_toml("[[hosts]]\nname = \"worker\"\n\n[[hosts]]\nname = \"worker\"\n")
                 .unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "{err}");
+    }
+
+    #[test]
+    fn a_local_host_parses_and_keeps_its_label_and_env() {
+        let cfg = Config::from_toml(
+            r#"
+[[hosts]]
+name = "client"
+local = true
+concurrency = 2
+capabilities = ["vaapi"]
+
+[hosts.env]
+LD_LIBRARY_PATH = "/opt/driver/lib"
+"#,
+        )
+        .unwrap();
+        assert!(cfg.hosts[0].local);
+        assert_eq!(cfg.hosts[0].name, "client");
+        assert_eq!(cfg.hosts[0].concurrency, 2);
+        assert_eq!(
+            cfg.hosts[0].env.get("LD_LIBRARY_PATH").map(String::as_str),
+            Some("/opt/driver/lib")
+        );
+    }
+
+    #[test]
+    fn a_local_host_refuses_keys_it_would_ignore() {
+        for body in [
+            "local = true\nagent_addr = \"worker.invalid:9876\"",
+            "local = true\nffmpeg_bin = \"/usr/bin/ffmpeg\"",
+            "local = true\nffprobe_bin = \"/usr/bin/ffprobe\"",
+            "local = true\nssh_args = [\"-p\", \"22\"]",
+        ] {
+            let text = format!("[[hosts]]\nname = \"client\"\n{body}\n");
+            let err = Config::from_toml(&text).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{err}");
+        }
+        let mapped = "[[hosts]]\nname = \"client\"\nlocal = true\n\n[[hosts.paths]]\nfrom = \"/home/alice\"\nto = \"/home/bob\"\n";
+        let err = Config::from_toml(mapped).unwrap_err();
         assert!(matches!(err, Error::Config(_)), "{err}");
     }
 

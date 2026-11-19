@@ -115,6 +115,8 @@ pub struct Worker {
     pub tokens: Vec<String>,
     pub concurrency: usize,
     pub paths: Vec<PathMap>,
+    /// The client's own machine writes to the client's own paths.
+    pub local: bool,
 }
 
 impl Worker {
@@ -135,6 +137,7 @@ pub fn workers(config: &Config) -> Vec<Worker> {
             tokens: host.capabilities.clone(),
             concurrency: host.concurrency,
             paths: host.paths.clone(),
+            local: host.local,
         })
         .collect()
 }
@@ -390,10 +393,10 @@ fn temp_row(temp: &str, workers: &[Worker]) -> Row {
     let covered: Vec<&str> = workers
         .iter()
         .filter(|worker| {
-            worker
-                .paths
-                .iter()
-                .any(|map| !map.from.as_os_str().is_empty() && path.starts_with(map.from.as_path()))
+            worker.local
+                || worker.paths.iter().any(|map| {
+                    !map.from.as_os_str().is_empty() && path.starts_with(map.from.as_path())
+                })
         })
         .map(|worker| worker.name.as_str())
         .collect();
@@ -508,6 +511,7 @@ mod tests {
                 from: PathBuf::from("/dev/shm/jellyfin-transcode"),
                 to: PathBuf::from("/home/bob/transcode"),
             }],
+            local: false,
         }
     }
 
@@ -760,6 +764,23 @@ mod tests {
         assert_eq!(workers[0].concurrency, 3);
         assert!(workers[0].accepts(&["vaapi".to_string()]));
         assert!(!workers[0].accepts(&["qsv".to_string()]));
+    }
+
+    #[test]
+    fn a_local_worker_already_sees_the_transcoding_temp_path() {
+        let s = settings(&vaapi_xml(
+            "<TranscodingTempPath>/dev/shm/jellyfin-transcode</TranscodingTempPath>",
+        ));
+        let mut here = worker("client", &["vaapi"]);
+        here.paths.clear();
+        here.local = true;
+        let rows = super::rows(&s, &[here], capabilities::DEFAULT_VAAPI_DEVICE);
+        let temp = rows
+            .iter()
+            .find(|r| r.setting == "TranscodingTempPath")
+            .unwrap();
+        assert_eq!(temp.verdict, "ok");
+        assert_eq!(temp.detail, "covered on client");
     }
 
     #[test]

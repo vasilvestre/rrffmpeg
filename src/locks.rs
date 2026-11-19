@@ -201,6 +201,7 @@ mod tests {
 
     fn host(name: &str, concurrency: usize) -> Host {
         Host {
+            local: false,
             name: name.to_string(),
             concurrency,
             capabilities: Vec::new(),
