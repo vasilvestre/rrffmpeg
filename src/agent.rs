@@ -1239,6 +1239,61 @@ mod tests {
         assert!(exec(&agent(), &h, &job(&["x"]), None).is_err());
         assert!(!agent().probe(&h));
     }
+
+    #[test]
+    fn an_unknown_frame_kind_is_a_protocol_error() {
+        let _serial = crate::exclusive();
+        let (config, cert) = tls();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let live: Live = Arc::new(Mutex::new(HashMap::new()));
+        let daemon = std::thread::spawn(move || {
+            let (sock, _) = listener.accept().expect("accept");
+            handle(sock, TOKEN, &live, config)
+        });
+
+        let conn = ClientConnection::new(
+            client_config(&cert).expect("client config"),
+            server_name("127.0.0.1").expect("name"),
+        )
+        .expect("client");
+        let sock = TcpStream::connect(addr).expect("connect");
+        sock.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        let mut client = StreamOwned::new(conn, sock);
+        // The first frame must be a hello. Any other kind is refused before
+        // an op runs, so the daemon never answers it.
+        write_frame(&mut client, 0x7f, b"nope").expect("write");
+        let mut sink = [0u8; 64];
+        let _ = client.read(&mut sink);
+
+        let err = daemon
+            .join()
+            .expect("daemon thread")
+            .expect_err("the daemon accepted an unknown first frame");
+        assert!(err.to_string().contains("first frame is 127"), "{err}");
+    }
+
+    #[test]
+    fn a_child_that_exits_before_reading_stdin_still_returns() {
+        let _serial = crate::exclusive();
+        let addr = start();
+        let h = host(&addr, "/bin/true");
+        let (done, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // More than a pipe buffer: a daemon that blocks writing the dead
+            // child's stdin never reaches the exit frame.
+            let input = "x".repeat(256 * 1024);
+            let result = exec(&agent(), &h, &job(&[]), Some(&input))
+                .map(|(code, out, err)| (code, out.len(), err.len()));
+            let _ = done.send(result);
+        });
+        let (code, out, err) = answer
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the dispatcher hung on a child that never read stdin")
+            .expect("exec");
+        assert_eq!(code, 0);
+        assert_eq!((out, err), (0, 0));
+    }
 }
 
 #[cfg(test)]

@@ -691,6 +691,36 @@ mod tests {
     }
 
     #[test]
+    fn records_of_a_directory_with_no_journal_is_empty() {
+        let dir = temp_dir("records-none");
+        assert!(super::records(&dir).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn records_skip_blank_and_unparsable_lines() {
+        let dir = temp_dir("records-skip");
+        {
+            let journal = Journal::open(&dir).unwrap();
+            journal.append(started("a", "worker"));
+        }
+        let path = dir.join(JOURNAL_NAME);
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str("\nnot json\n\n");
+        std::fs::write(&path, text).unwrap();
+        assert_eq!(super::records(&dir).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_file_has_no_tail_sequence() {
+        let dir = temp_dir("tail-missing");
+        assert_eq!(tail_seq(&dir.join("nope")), 0);
+        assert!(rotated_files(&dir.join("nope")).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn counters_are_correct_before_any_sync() {
         let dir = temp_dir("counters");
         let journal = Journal::open(&dir).unwrap();
@@ -975,5 +1005,87 @@ mod tests {
             "append average {average:?} is too slow"
         );
         assert_eq!(journal.active_on("worker"), N);
+    }
+
+    /// A crash can leave a rotated segment with a half-written first line.
+    /// Replay skips that line and still applies the records after it, in that
+    /// segment and in the active file.
+    #[test]
+    fn a_rotated_file_with_a_truncated_header_does_not_stop_replay() {
+        let dir = temp_dir("rotated-truncated");
+        let truncated = "{\"seq\":1,\"ts\":0,\"ev\":{\"kind\":\"started\",\"jo";
+        let first = serde_json::to_string(&Record {
+            seq: 2,
+            ts: 0,
+            ev: started("a", "worker"),
+        })
+        .unwrap();
+        std::fs::write(dir.join("journal.1"), format!("{truncated}\n{first}\n")).unwrap();
+
+        let second = serde_json::to_string(&Record {
+            seq: 3,
+            ts: 0,
+            ev: started("b", "worker"),
+        })
+        .unwrap();
+        std::fs::write(dir.join(JOURNAL_NAME), format!("{second}\n")).unwrap();
+
+        let journal = Journal::open(&dir).unwrap();
+        assert_eq!(journal.active_on("worker"), 2);
+        let mut jobs = journal.active_jobs();
+        jobs.sort();
+        assert_eq!(
+            jobs,
+            vec![
+                ("a".to_string(), "worker".to_string()),
+                ("b".to_string(), "worker".to_string()),
+            ]
+        );
+    }
+
+    /// The janitor may see a job id it never recorded, for example after a
+    /// state dir swap. Reaping it must not touch the jobs that are running.
+    #[test]
+    fn reap_of_an_unknown_job_is_a_no_op() {
+        let dir = temp_dir("reap-unknown");
+        let journal = Journal::open(&dir).unwrap();
+        journal.append(started("a", "worker"));
+
+        journal.append(Event::Reaped {
+            job: "ghost".into(),
+        });
+
+        assert_eq!(journal.active_on("worker"), 1);
+        assert_eq!(
+            journal.active_jobs(),
+            vec![("a".to_string(), "worker".to_string())]
+        );
+    }
+
+    /// `records` merges the active and the rotated files, so the caller sees
+    /// one sequence, not file order.
+    #[test]
+    fn records_orders_rotated_and_active_files_by_sequence() {
+        let dir = temp_dir("records-order");
+        let record = |seq: u64, job: &str| {
+            serde_json::to_string(&Record {
+                seq,
+                ts: 0,
+                ev: started(job, "worker"),
+            })
+            .unwrap()
+        };
+        // Written out of sequence order and out of file order: the sort must
+        // come from `seq`, not from the read order.
+        std::fs::write(dir.join("journal.2"), format!("{}\n", record(30, "c"))).unwrap();
+        std::fs::write(dir.join("journal.1"), format!("{}\n", record(10, "a"))).unwrap();
+        std::fs::write(dir.join(JOURNAL_NAME), format!("{}\n", record(20, "b"))).unwrap();
+
+        let seqs: Vec<u64> = super::records(&dir)
+            .unwrap()
+            .iter()
+            .map(|r| r.seq)
+            .collect();
+        assert_eq!(seqs, vec![10, 20, 30]);
     }
 }

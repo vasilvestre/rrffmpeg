@@ -283,6 +283,15 @@ mod tests {
         tap.stats
     }
 
+    /// Tests that touch the global `Tap` serialize on one lock, and start from
+    /// an empty slot so an earlier test cannot leak a sample into this one.
+    fn global() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        let guard = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = take();
+        guard
+    }
+
     const INPUT: &str = "Input #0, matroska,webm, from '/m/x.mkv':\r\n  \
         Stream #0:0: Video: hevc (Main 10), yuv420p10le(tv, bt2020nc/bt2020/smpte2084), \
         3840x2160 [SAR 1:1 DAR 16:9], 23.98 fps\n";
@@ -395,8 +404,37 @@ mod tests {
 
     #[test]
     fn taking_resets_the_slot() {
+        let _guard = global();
         feed(b"frame=1 fps=24 speed=1.0x\r");
         assert_eq!(take().fps, Some(24.0));
         assert_eq!(take().fps, None);
+    }
+
+    #[test]
+    fn feed_is_safe_when_two_streams_interleave() {
+        // ffmpeg writes stats and stream lines from one pipe: the chunks reach
+        // the tap in the order they were written, one complete line each.
+        let _guard = global();
+        feed(b"Input #0, matroska,webm, from '/home/alice/x.mkv':\n");
+        feed(b"frame=1 fps=12 speed=1.0x\r");
+        feed(
+            b"  Stream #0:0: Video: hevc, yuv420p10le(tv, bt2020nc/bt2020/smpte2084), 1920x1080\n",
+        );
+        feed(b"frame=2 fps=24 speed=1.2x\r");
+        let stats = take();
+        assert_eq!(stats.fps, Some(24.0));
+        assert_eq!(stats.src_codec.as_deref(), Some("hevc"));
+        assert_eq!((stats.src_w, stats.src_h), (Some(1920), Some(1080)));
+        assert_eq!(stats.src_hdr.as_deref(), Some("hdr10"));
+    }
+
+    #[test]
+    fn take_without_feed_returns_empty() {
+        let _guard = global();
+        let stats = take();
+        assert_eq!(stats.fps, None);
+        assert_eq!(stats.speed, None);
+        assert_eq!(stats.src_w, None);
+        assert_eq!(stats.video, None);
     }
 }

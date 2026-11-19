@@ -422,4 +422,52 @@ mod tests {
             "stop took {elapsed:?} with a 1 hour interval"
         );
     }
+
+    #[test]
+    fn two_janitors_do_not_double_reap() {
+        let dir = tempdir("double-reap");
+        let journal = Arc::new(Journal::open(&dir).expect("journal"));
+        assert!(
+            start(&journal, "j1", "worker"),
+            "the journal does not report the Started job as active"
+        );
+        let scheduler = scheduler(&dir);
+        let transport = Arc::new(FakeTransport::new(true, false));
+
+        // Different intervals, so the second cycle of the first janitor
+        // reaps while the second janitor still remembers the job.
+        let first = Janitor::spawn(
+            scheduler.clone(),
+            Arc::clone(&journal),
+            transport.clone(),
+            Duration::from_millis(10),
+        );
+        let second = Janitor::spawn(
+            scheduler,
+            Arc::clone(&journal),
+            transport,
+            Duration::from_millis(15),
+        );
+
+        let reaps = || {
+            crate::state::records(&dir)
+                .map(|records| {
+                    records
+                        .iter()
+                        .filter(|record| matches!(&record.ev, Event::Reaped { job } if job == "j1"))
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+        let one = wait_until(|| reaps() == 1);
+        // Several more cycles of the second janitor, which must find nothing
+        // left to reap now that the shared journal dropped the job.
+        thread::sleep(Duration::from_millis(200));
+        let count = reaps();
+        first.stop();
+        second.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(one, "no janitor reaped the dead job");
+        assert_eq!(count, 1, "two janitors recorded {count} Reaped events");
+    }
 }

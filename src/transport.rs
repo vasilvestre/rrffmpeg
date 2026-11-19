@@ -470,6 +470,20 @@ mod tests {
     }
 
     #[test]
+    fn shell_quote_handles_newline_and_nul() {
+        // A newline is a literal byte inside single quotes.
+        assert_eq!(shell_quote("a\nb"), "'a\nb'");
+        // A NUL is valid UTF-8, so the quote layer keeps it as-is. An exec
+        // argument cannot carry a NUL, so spawning with one is refused rather
+        // than silently truncated.
+        assert_eq!(shell_quote("a\0b"), "'a\0b'");
+        let refused = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("a\0b")
+            .status();
+        assert!(refused.is_err(), "a NUL argument must be refused");
+    }
+
+    #[test]
     fn remote_command_has_the_exact_shape() {
         let dir = fixture("shape");
         let _serial = crate::exclusive();
@@ -830,5 +844,36 @@ mod tests {
         job.args.push(OsString::from_vec(b"bad\xff".to_vec()));
 
         assert!(s.remote_command(&job, &host(), false).is_err());
+    }
+
+    #[test]
+    fn router_prefers_the_agent_when_the_host_has_one() {
+        let dir = fixture("router");
+        let _serial = crate::exclusive();
+        let router = Router {
+            ssh: ssh(dir.join("unused-ssh"), &dir),
+            agent: None,
+        };
+
+        // No agent is configured. A host with agent_addr still takes the agent
+        // path and reports the missing token, instead of falling back to ssh.
+        let mut with_agent = host();
+        with_agent.agent_addr = Some("agent.invalid:9876".into());
+        let err = router
+            .run(&with_agent, &job(&[]), false)
+            .expect_err("agent path chosen");
+        assert!(matches!(err, Error::Config(_)), "{err}");
+        assert!(!router.probe(&with_agent));
+
+        // The same router sends a host without agent_addr over ssh.
+        let argv = dir.join("ssh-argv");
+        let ssh_router = Router {
+            ssh: ssh(fake_exit_ssh(&dir, &argv, 0), &dir),
+            agent: None,
+        };
+        assert_eq!(
+            ssh_router.run(&host(), &job(&[]), false).expect("ssh path"),
+            0
+        );
     }
 }

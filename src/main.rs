@@ -542,4 +542,71 @@ mod tests {
         drop(calls);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rrffmpeg-main-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_private_directory_is_created_with_mode_700() {
+        let root = scratch("private");
+        let dir = private_dir(&root.join("socket")).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_symlinked_socket_directory_is_refused() {
+        let root = scratch("symlink");
+        let target = root.join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(matches!(private_dir(&link), Err(Error::Config(_))));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_non_directory_socket_path_is_refused() {
+        let root = scratch("file");
+        let file = root.join("file");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(private_dir(&file).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_half_configured_agent_is_an_error() {
+        let config = Config {
+            agent_token: Some("secret".into()),
+            ..Config::default()
+        };
+        assert!(matches!(agent_client(&config), Err(Error::Config(_))));
+    }
+
+    #[test]
+    fn capabilities_refuses_a_host_that_matches_nothing() {
+        let config = Config {
+            hosts: vec![host("worker")],
+            ..Config::default()
+        };
+        let err = capabilities_command(&config, &args(&["other"])).unwrap_err();
+        assert!(matches!(err, Error::Config(m) if m.contains("no host matches")));
+    }
+
+    #[test]
+    fn an_explicit_socket_directory_wins_over_the_defaults() {
+        let root = scratch("socket-dir");
+        let socket = root.join("socket");
+        let config = Config {
+            ssh_socket_dir: Some(socket.clone()),
+            ..Config::default()
+        };
+        assert_eq!(ssh_socket_dir(&config).unwrap(), socket);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

@@ -218,4 +218,36 @@ mod tests {
         assert!(s.ends_with("true"));
         assert!(!s.contains('\n'));
     }
+
+    #[test]
+    fn copy_does_not_request_a_codec_token() {
+        assert!(required(&args(&["-c:v", "copy"])).is_empty());
+        assert!(required(&args(&["-c:v", "copy", "-c:a", "copy"])).is_empty());
+    }
+
+    #[test]
+    fn duplicate_requirements_are_deduplicated() {
+        // Two encoders naming the same accelerator, plus repeated hints, still
+        // yield each token once.
+        let need = required(&args(&[
+            "-c:v",
+            "h264_vaapi",
+            "-profile:v",
+            "main10",
+            "-c:v",
+            "hevc_vaapi",
+            "-vf",
+            "format=p010,hwupload",
+            "-vf",
+            "tonemap_vaapi=format=nv12",
+        ]));
+        assert_eq!(need, vec!["vaapi", "vaapi_hevc10", "vaapi_tonemap"]);
+    }
+
+    #[test]
+    fn token_matching_is_case_sensitive() {
+        assert!(required(&args(&["-c:v", "h264_VAAPI"])).is_empty());
+        assert!(parse("VAAPI\nVaapi\n").is_empty());
+        assert_eq!(parse("vaapi\n"), vec!["vaapi"]);
+    }
 }

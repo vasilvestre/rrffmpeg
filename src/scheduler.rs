@@ -587,4 +587,106 @@ mod tests {
         }
         assert_eq!(next_interval(-5, Duration::from_secs(1)), FAST_POLL);
     }
+
+    /// A zero timeout must not turn into a poll: a free slot is taken at once
+    /// and a full host returns `None` on the first pass.
+    #[test]
+    fn acquire_blocking_with_zero_wait_returns_immediately() {
+        let (dir, scheduler) = build(vec![host("w", 1, &[])], "zero-wait");
+        let _serial = crate::exclusive();
+
+        let start = Instant::now();
+        let lease = scheduler
+            .acquire_blocking(&job(0, &[]), Duration::ZERO)
+            .expect("a free slot is taken without waiting");
+        assert!(start.elapsed() < Duration::from_secs(1));
+
+        let start = Instant::now();
+        assert!(
+            scheduler
+                .acquire_blocking(&job(0, &[]), Duration::ZERO)
+                .is_none(),
+            "a full host returns at once, it does not poll"
+        );
+        assert!(start.elapsed() < Duration::from_secs(1));
+
+        drop(lease);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An empty capability list is the host saying it can run anything, so a
+    /// job that needs several capabilities still lands there.
+    #[test]
+    fn a_host_with_no_capabilities_takes_every_job() {
+        let (dir, scheduler) = build(vec![host("open", 1, &[])], "any-capability");
+        let _serial = crate::exclusive();
+
+        let lease = scheduler
+            .acquire(&job(0, &["vaapi", "hevc", "tonemap"]))
+            .expect("a host with no declared capabilities accepts any job");
+        assert_eq!(lease.host.name, "open");
+
+        drop(lease);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The janitor probes a host every cycle. A failed probe while the verdict
+    /// is already down must not push the expiry out, or the host stays down
+    /// forever.
+    #[test]
+    fn down_verdict_expiry_is_not_reset_by_a_probe_failure() {
+        let (dir, locks) = scratch("down-expiry");
+        let _serial = crate::exclusive();
+        let scheduler = Scheduler::new(
+            vec![host("w", 1, &[])],
+            Arc::clone(&locks),
+            Duration::from_secs(5),
+        );
+        let down = locks.coord().join(crate::locks::hostkey("w")).join("down");
+
+        scheduler.mark_down("w");
+        let first = std::fs::read_to_string(&down).expect("the verdict is written");
+
+        // Failed probes: the host is down, so every acquire returns nothing.
+        for _ in 0..5 {
+            assert!(scheduler.acquire(&job(0, &[])).is_none());
+            assert!(scheduler.is_down("w"));
+            // Long enough that a rewritten expiry would land on a new ms.
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let after = std::fs::read_to_string(&down).expect("the verdict is still there");
+        assert_eq!(
+            first, after,
+            "a failed probe must not extend the down verdict"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn concurrent_acquires_do_not_report_a_full_host_while_slots_are_free() {
+        // Eight threads share sixteen slots, so at least eight are always free.
+        // Occupancy probes used to take the same exclusive lock as a holder,
+        // and eight probes plus eight holders made the host read as full.
+        let (dir, scheduler) = build(vec![host("worker", 16, &[])], "parallel-free");
+        let scheduler = Arc::new(scheduler);
+        let barrier = Arc::new(Barrier::new(8));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let scheduler = Arc::clone(&scheduler);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                let job = job(0, &[]);
+                barrier.wait();
+                for _ in 0..1_000 {
+                    let lease = scheduler.acquire(&job).expect("a free slot");
+                    drop(lease);
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("acquire thread");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

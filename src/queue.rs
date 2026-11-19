@@ -476,6 +476,66 @@ mod tests {
     }
 
     #[test]
+    fn a_malformed_ticket_is_skipped_and_removed() {
+        let (dir, queue) = scratch("malformed");
+        let lane = queue.join("w", 0, "alice", 100);
+        let junk = queue.dir("w").join("1-1.want");
+        std::fs::write(&junk, "garbage\n").expect("write junk ticket");
+        assert!(
+            queue.ahead(&lane),
+            "a ticket that does not parse must not block a live one"
+        );
+        assert!(junk.exists(), "a fresh junk ticket is only skipped");
+
+        // A junk ticket is never refreshed, so age removes it like any stale one.
+        let old = FileTimes::new().set_modified(SystemTime::now() - Duration::from_secs(30));
+        File::options()
+            .write(true)
+            .open(&junk)
+            .unwrap()
+            .set_times(old)
+            .unwrap();
+        assert!(queue.ahead(&lane));
+        assert!(!junk.exists(), "the stale junk ticket must be cleaned");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn two_tickets_with_the_same_timestamp_still_order() {
+        let (dir, queue) = scratch("tie");
+        let host_dir = queue.dir("w");
+        std::fs::create_dir_all(&host_dir).expect("host dir");
+        let low = host_dir.join("7-100.want");
+        let high = host_dir.join("7-200.want");
+        std::fs::write(&low, "0 100 7 alice\n").expect("low ticket");
+        std::fs::write(&high, "0 100 7 alice\n").expect("high ticket");
+
+        let lane = |path: &Path| Lane {
+            file: Some(
+                File::options()
+                    .read(true)
+                    .write(true)
+                    .open(path)
+                    .expect("open ticket"),
+            ),
+            dir: host_dir.clone(),
+            path: path.to_path_buf(),
+            class: 0,
+            weight: 100,
+            seq: 7,
+            client: "alice".to_string(),
+        };
+        let a = lane(&low);
+        let b = lane(&high);
+        assert!(
+            queue.ahead(&a) ^ queue.ahead(&b),
+            "equal timestamps must still pick one winner"
+        );
+        assert!(queue.ahead(&a), "the lower path name must break the tie");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn old_starts_are_forgotten() {
         let (dir, queue) = scratch("ttl");
         queue.charge("w", "alice");

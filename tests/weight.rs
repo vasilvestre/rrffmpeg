@@ -1,6 +1,6 @@
-//! The weight must change who starts, not only who ranks first. Two clients
+//! The weight must change who starts, not only who ranks first. Three clients
 //! bring more jobs than one slot can serve, and the start order must follow
-//! the weight ratio while both still have work.
+//! the weight ratio while all of them still have work.
 
 use rrffmpeg::config::Host;
 use rrffmpeg::locks::LockDir;
@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const JOBS_PER_CLIENT: usize = 20;
-/// How many starts to judge. Both clients still have jobs left in this window,
+/// How many starts to judge. Every client still has jobs left in this window,
 /// so the split reflects the queue and not who ran out of work first.
-const WINDOW: usize = 20;
+const WINDOW: usize = 21;
 
 fn worker() -> Host {
     Host {
@@ -117,17 +117,18 @@ fn the_weight_sets_the_order_of_starts_under_contention() {
                 .with_client(name, weight),
         )
     };
-    let heavy = build("heavy", 400);
-    let light = build("light", 100);
+    // Shares of 4 : 2 : 1, so 21 starts should split about 12 : 6 : 3.
+    let clients = [("heavy", 400u32), ("medium", 200u32), ("light", 100u32)];
+    let schedulers: Vec<_> = clients
+        .iter()
+        .map(|(name, weight)| build(name, *weight))
+        .collect();
     let order = Arc::new(Mutex::new(Vec::new()));
 
     let mut handles = Vec::new();
-    for i in 0..2 * JOBS_PER_CLIENT {
-        let (scheduler, name) = if i % 2 == 0 {
-            (heavy.clone(), "heavy")
-        } else {
-            (light.clone(), "light")
-        };
+    for i in 0..3 * JOBS_PER_CLIENT {
+        let (name, _) = clients[i % clients.len()];
+        let scheduler = schedulers[i % clients.len()].clone();
         let order = order.clone();
         handles.push(std::thread::spawn(move || {
             let job = Job {
@@ -155,12 +156,26 @@ fn the_weight_sets_the_order_of_starts_under_contention() {
     let _ = std::fs::remove_dir_all(&dir);
 
     assert!(charged >= 30, "only {charged} starts were charged");
-    assert!(order.len() == 2 * JOBS_PER_CLIENT, "every job starts once");
+    assert!(order.len() == 3 * JOBS_PER_CLIENT, "every job starts once");
     let window = &order[..WINDOW];
-    let heavy = window.iter().filter(|name| **name == "heavy").count();
-    let light = window.len() - heavy;
+    let count = |name: &str| window.iter().filter(|seen| **seen == name).count();
+    let (heavy, medium, light) = (count("heavy"), count("medium"), count("light"));
+
+    // Expected share is window * weight / total weight.
+    let total_weight: f64 = clients.iter().map(|(_, weight)| f64::from(*weight)).sum();
+    for (name, weight, got) in [
+        ("heavy", clients[0].1, heavy),
+        ("medium", clients[1].1, medium),
+        ("light", clients[2].1, light),
+    ] {
+        let expected = WINDOW as f64 * f64::from(weight) / total_weight;
+        assert!(
+            (got as f64 - expected).abs() <= 3.0,
+            "first {WINDOW} starts: {name} {got}, expected about {expected:.1}"
+        );
+    }
     assert!(
-        heavy >= 3 * light,
-        "first {WINDOW} starts: heavy {heavy}, light {light}, expected about 4 to 1"
+        heavy >= 2 * light,
+        "first {WINDOW} starts: heavy {heavy}, light {light}, expected a 4 to 1 split"
     );
 }

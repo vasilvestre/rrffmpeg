@@ -255,4 +255,34 @@ mod tests {
             assert_eq!(to_worker(&h, &os(arg)), os(arg), "{arg} must not change");
         }
     }
+
+    #[test]
+    fn a_bare_file_colon_is_left_alone() {
+        let h = production();
+        assert_eq!(to_worker(&h, &os("file:")), os("file:"));
+    }
+
+    #[test]
+    fn two_maps_of_equal_length_pick_the_first_declared() {
+        // Same `from` under two `to`: the depth and byte keys tie, so the
+        // strict comparison keeps the rule declared first.
+        let h = host(vec![
+            ("/home/alice", "/mnt/first"),
+            ("/home/alice", "/mnt/second"),
+        ]);
+        assert_eq!(
+            to_worker(&h, &os("/home/alice/film.mkv")),
+            os("/mnt/first/film.mkv")
+        );
+    }
+
+    #[test]
+    fn a_map_to_the_same_root_is_identity() {
+        let h = host(vec![("/home/alice", "/home/alice")]);
+        assert_eq!(
+            to_worker(&h, &os("/home/alice/media/film.mkv")),
+            os("/home/alice/media/film.mkv")
+        );
+        assert_eq!(to_worker(&h, &os("/home/alice")), os("/home/alice"));
+    }
 }

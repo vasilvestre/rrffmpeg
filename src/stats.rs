@@ -378,6 +378,28 @@ mod tests {
     }
 
     #[test]
+    fn percentile_of_an_empty_slice_returns_zero() {
+        assert_eq!(percentile(&[], 0.5), 0);
+        assert_eq!(percentile(&[], 1.0), 0);
+    }
+
+    #[test]
+    fn percentile_above_one_is_clamped() {
+        let samples = [1, 2, 3, 4];
+        assert_eq!(percentile(&samples, 1.5), 4);
+        assert_eq!(percentile(&samples, 9.0), 4);
+    }
+
+    #[test]
+    fn human_rounds_at_the_unit_boundary() {
+        // 999_999 us stays in the millisecond branch, so the two-decimal
+        // rounding yields "1000.00 ms". It never crosses into a "1000.0 s"
+        // label, which is the boundary this guards.
+        assert_eq!(human(999_999), "1000.00 ms");
+        assert_eq!(human(1_000_000), "1.0 s");
+    }
+
+    #[test]
     fn a_started_and_a_finished_make_one_measured_job() {
         let path = "journal".to_string();
         let records = vec![

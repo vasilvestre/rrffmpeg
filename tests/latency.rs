@@ -568,3 +568,78 @@ fn arg_and_stderr_cost() {
     );
     std::io::stdout().flush().ok();
 }
+
+/// Fixed cost every ffmpeg call pays before it dispatches: read and parse the
+/// config, build the TLS client config, open the journal. The transport and the
+/// process image are measured elsewhere; this isolates the setup.
+#[test]
+#[ignore = "measurement: cargo test --release --test latency -- --ignored --nocapture startup_cost"]
+fn startup_cost() {
+    const N: usize = 2000;
+    let dir = std::env::temp_dir().join(format!("rrffmpeg-latency-startup-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    generate_cert(&dir, &["127.0.0.1".to_string()]).expect("cert");
+
+    let text = r#"
+agent_token = "t"
+agent_cert = "/tmp/cert.pem"
+
+[[hosts]]
+name = "worker"
+concurrency = 4
+capabilities = ["vaapi"]
+
+[[hosts.paths]]
+from = "/home/alice"
+to = "/home/bob/media"
+"#;
+    let per = |label: &str, mut f: Box<dyn FnMut()>| {
+        for _ in 0..100 {
+            f();
+        }
+        let began = Instant::now();
+        for _ in 0..N {
+            f();
+        }
+        let us = began.elapsed().as_secs_f64() * 1e6 / N as f64;
+        println!("{label:<28} {us:8.1} us per call");
+        std::io::stdout().flush().ok();
+    };
+
+    per(
+        "Config::from_toml",
+        Box::new(|| {
+            std::hint::black_box(
+                rrffmpeg::config::Config::from_toml(std::hint::black_box(text)).expect("cfg"),
+            );
+        }),
+    );
+    per(
+        "Agent::load (TLS config)",
+        Box::new(|| {
+            std::hint::black_box(Agent::load("t".into(), &dir.join("cert.pem")).expect("agent"));
+        }),
+    );
+    per(
+        "Journal::open + drop",
+        Box::new(|| {
+            std::hint::black_box(Journal::open(&dir).expect("journal"));
+        }),
+    );
+    let hosts = rrffmpeg::config::Config::from_toml(text)
+        .expect("cfg")
+        .hosts;
+    per(
+        "Scheduler::new + LockDir",
+        Box::new(|| {
+            std::hint::black_box(Scheduler::new(
+                hosts.clone(),
+                Arc::new(LockDir::new(&dir)),
+                Duration::from_secs(60),
+            ));
+        }),
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
