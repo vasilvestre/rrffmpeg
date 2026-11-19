@@ -12,10 +12,16 @@ is mostly in place. Read the pitch for why, this file for how.
 ## Build and test
 
 ```bash
-cargo test                       # 59 tests, including real ffmpeg 8.x fidelity
+cargo test                       # 189 tests, including real ffmpeg 8.x fidelity
+cargo bench                      # dispatch, journal, queue, progress, scheduler
 cargo clippy --all-targets -- -D warnings
 cargo build --release
+cargo llvm-cov --html            # coverage, opens target/llvm-cov/html/index.html
+cargo llvm-cov --fail-under-lines 85   # what CI enforces
 ```
+
+Local coverage needs two one-time installs: `rustup component add
+llvm-tools-preview` and `cargo install cargo-llvm-cov --locked`.
 
 A `v*` tag runs `.github/workflows/release.yml`, which publishes static
 `x86_64` and `aarch64` binaries on the releases page. The install steps live
@@ -136,8 +142,12 @@ Every decision that shapes the code gets a record in `docs/adr/`. The index is
 
 ## Success criterion
 
-The production pair runs on rrffmpeg for a week with no manual repair and
-dispatch p99 under 50 ms.
+The production pair runs on rrffmpeg for a week with no manual repair.
+End to end, dispatch p99 stays under 50 ms over SSH with connection
+persistence (measured 46.94 ms) and under 35 ms over the agent (measured
+33.92 ms). The dispatcher's own overhead, on top of a local ffmpeg, stays
+under 10 ms at p99 (measured 4.2 ms: 3.8 ms dispatcher plus 0.4 ms TLS).
+Numbers and method: ADR 0014 and `docs/latency.md`.
 
 ## References
 

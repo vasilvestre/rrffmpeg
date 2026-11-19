@@ -1,5 +1,7 @@
 # rrffmpeg: a remote FFmpeg wrapper for Jellyfin transcodes
 
+[![coverage](https://codecov.io/gh/vasilvestre/rrffmpeg/branch/main/graph/badge.svg)](https://codecov.io/gh/vasilvestre/rrffmpeg)
+
 `rrffmpeg` is a remote FFmpeg wrapper in Rust. Like
 [rffmpeg](https://github.com/joshuaboniface/rffmpeg), it stands in for `ffmpeg`
 inside Jellyfin and sends each transcode command to a machine that has the GPU,
@@ -131,11 +133,14 @@ Ship the smallest thing that is strictly better than rffmpeg. State today:
   failing probe are still hand-written. `docs/replay.md`.
 
 Success criterion: the production pair (`client` → `worker`) runs on rrffmpeg
-for a week, dispatch p99 under 50 ms, and nobody has to run a repair command.
+for a week with no manual repair. End to end, dispatch p99 stays under 50 ms
+over SSH with connection persistence and under 35 ms over the agent, and the
+dispatcher's own overhead stays under 10 ms at p99.
 
 Measured so far, on one loopback box with the real ffmpeg 8.0.1: dispatch p99
 32.95 ms, of which ffmpeg itself is 27.8 ms, the dispatcher adds 3.8 ms and the
-TLS transport 0.4 ms. Method and raw runs in `docs/latency.md`.
+TLS transport 0.4 ms. Over a LAN, persistence on SSH is 46.94 ms p99 and the
+agent 33.92 ms p99 (ADR 0014). Method and raw runs in `docs/latency.md`.
 
 ## Agent transport
 
