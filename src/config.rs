@@ -89,12 +89,14 @@ impl Program {
 
 /// Rewrites one path prefix. The longest matching `from` wins.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PathMap {
     pub from: PathBuf,
     pub to: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Host {
     /// `ssh` destination: `worker`, `user@worker`, or an IP.
     pub name: String,
@@ -124,6 +126,7 @@ pub struct Host {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub hosts: Vec<Host>,
@@ -218,7 +221,20 @@ impl Config {
     }
 
     pub fn from_toml(text: &str) -> Result<Config> {
-        toml::from_str(text).map_err(|e| Error::Config(e.to_string()))
+        let config: Config = toml::from_str(text).map_err(|e| Error::Config(e.to_string()))?;
+        let mut seen = std::collections::HashSet::new();
+        for host in &config.hosts {
+            if host.concurrency == 0 {
+                return Err(Error::Config(format!(
+                    "host {}: concurrency must be at least 1",
+                    host.name
+                )));
+            }
+            if !seen.insert(host.name.as_str()) {
+                return Err(Error::Config(format!("duplicate host name {}", host.name)));
+            }
+        }
+        Ok(config)
     }
 
     /// Local binary for the program, used when no worker can take the job.
@@ -335,5 +351,71 @@ OCL_ICD_VENDORS = "/opt/intel/opencl"
         let cfg = Config::from_toml("").unwrap();
         assert!(cfg.hosts.is_empty());
         assert_eq!(cfg.local_ffmpeg, PathBuf::from("ffmpeg"));
+    }
+
+    #[test]
+    fn rrffmpeg_config_env_wins_over_the_default_path() {
+        let _guard = crate::exclusive();
+        let prev_config = std::env::var_os("RRFFMPEG_CONFIG");
+        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        // SAFETY: the exclusive lock serialises this test, and both values are
+        // restored before it returns.
+        unsafe {
+            std::env::set_var("RRFFMPEG_CONFIG", "/home/alice/custom.toml");
+            std::env::set_var("XDG_CONFIG_HOME", "/home/alice/.config");
+        }
+        assert_eq!(
+            config_path(),
+            Some(PathBuf::from("/home/alice/custom.toml"))
+        );
+        match prev_config {
+            Some(value) => unsafe { std::env::set_var("RRFFMPEG_CONFIG", value) },
+            None => unsafe { std::env::remove_var("RRFFMPEG_CONFIG") },
+        }
+        match prev_xdg {
+            Some(value) => unsafe { std::env::set_var("XDG_CONFIG_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+    }
+
+    #[test]
+    fn a_host_with_zero_slots_is_a_config_error() {
+        let err = Config::from_toml("[[hosts]]\nname = \"worker\"\nconcurrency = 0\n").unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "{err}");
+    }
+
+    #[test]
+    fn duplicate_host_names_are_rejected() {
+        let err =
+            Config::from_toml("[[hosts]]\nname = \"worker\"\n\n[[hosts]]\nname = \"worker\"\n")
+                .unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "{err}");
+    }
+
+    #[test]
+    fn client_weight_zero_does_not_divide_by_zero() {
+        let cfg = Config::from_toml("client_weight = 0").unwrap();
+        assert_eq!(cfg.client_weight, 0);
+        // The queue clamps the weight, so two waiters still order with no panic.
+        let dir =
+            std::env::temp_dir().join(format!("rrffmpeg-config-weight-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let queue = crate::queue::Queue::new(&dir);
+        let first = queue.join("worker", 0, "alice", 0);
+        let second = queue.join("worker", 0, "bob", 0);
+        assert!(
+            queue.ahead(&first) ^ queue.ahead(&second),
+            "exactly one of two waiters must rank first"
+        );
+        drop((first, second));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_unknown_key_is_reported_not_ignored() {
+        let err = Config::from_toml("client_weightt = 100").unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "{err}");
+        // The shipped example must stay valid under deny_unknown_fields.
+        Config::from_toml(include_str!("../config.example.toml")).expect("example config");
     }
 }
