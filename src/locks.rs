@@ -102,8 +102,10 @@ impl LockDir {
                 Ok(file) => file,
                 Err(_) => return 0,
             };
-            match file.try_lock() {
-                // Dropping the file releases the probe lock immediately.
+            // A shared probe never conflicts with another probe, so two
+            // threads reading occupancy at once do not count each other as
+            // load. An exclusive holder still blocks it.
+            match file.try_lock_shared() {
                 Ok(()) => drop(file),
                 Err(TryLockError::WouldBlock) => held += 1,
                 Err(TryLockError::Error(_)) => return 0,
@@ -311,6 +313,18 @@ mod tests {
         locks.mark_down("worker", Duration::from_secs(60));
         locks.mark_up("worker");
         assert!(!locks.is_down("worker"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_verdict_file_with_garbage_is_ignored() {
+        let (dir, locks) = scratch("garbage");
+        let host_dir = locks.dir("worker");
+        std::fs::create_dir_all(&host_dir).expect("host dir");
+        let path = locks.down_path("worker");
+        std::fs::write(&path, "not a number").expect("write verdict");
+        assert!(!locks.is_down("worker"), "garbage must read as up");
+        assert!(!path.exists(), "the unreadable verdict must be removed");
         let _ = std::fs::remove_dir_all(dir);
     }
 
