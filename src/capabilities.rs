@@ -102,8 +102,10 @@ pub fn required(args: &[OsString]) -> Vec<String> {
     let mut tonemap = false;
     for arg in args {
         let text = arg.to_string_lossy();
+        // `_vaapi` also ends with `vaapi`, so one suffix test covers both the
+        // bare and the prefixed encoder names.
         for cap in ["vaapi", "nvenc", "qsv", "amf", "videotoolbox"] {
-            if text.ends_with(cap) || text.ends_with(&format!("_{cap}")) {
+            if text.ends_with(cap) {
                 accelerator = Some(cap);
             }
         }
