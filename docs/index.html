@@ -310,6 +310,8 @@ ones only it can do, such as AV1 encode.</p>
     <tr><td><code>ffprobe_bin</code></td><td>inherited</td><td>ffprobe path on the worker.</td></tr>
     <tr><td><code>agent_addr</code></td><td>none</td><td><code>host:port</code> of <code>rrffmpeg-agent</code>. Set it to skip SSH for this host. Its host part must appear in the certificate.</td></tr>
     <tr><td><code>paths</code></td><td><code>[]</code></td><td>Path maps, see below.</td></tr>
+    <tr><td><code>reads</code></td><td><code>[]</code></td><td>Roots this host can open, as the host sees them after its own path maps, for example <code>["/home/bob/media"]</code>. A job whose input lies under none of them is never placed here, and earns no queue ticket. Several inputs must all be covered; a stream (<code>http://</code>, <code>pipe:0</code>) is not judged. An empty list accepts any input, so a config written before this key routes as it did.</td></tr>
+    <tr><td><code>prefer</code></td><td><code>0</code></td><td>Placement preference among otherwise equal hosts: higher wins. It never overrides a missing token, a root the host cannot read, a down host or a full host. A job that needs no accelerator token also prefers a host that needs no SSH.</td></tr>
     <tr><td><code>ssh_args</code></td><td><code>[]</code></td><td>Extra ssh arguments for this host, appended after the top-level list. A dedicated key goes here: <code>["-i", "/home/alice/.ssh/worker"]</code>.</td></tr>
     <tr><td><code>env</code></td><td><code>{}</code></td><td>Variables set on the worker for each job, as a table of strings. This replaces a wrapper script around ffmpeg.</td></tr>
   </tbody>

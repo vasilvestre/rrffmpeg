@@ -122,6 +122,15 @@ pub struct Host {
     pub agent_addr: Option<String>,
     #[serde(default)]
     pub paths: Vec<PathMap>,
+    /// Roots this host can open, as the host sees them. A job whose input is
+    /// under none of them is never placed here. Empty accepts any input, so a
+    /// config written before this key routes as it did (ADR 0030).
+    #[serde(default)]
+    pub reads: Vec<PathBuf>,
+    /// Placement preference among otherwise equal hosts. Higher wins, and the
+    /// default is equal for every host (ADR 0031).
+    #[serde(default)]
+    pub prefer: i32,
     /// Extra ssh arguments for this host, appended after the global ones.
     #[serde(default)]
     pub ssh_args: Vec<String>,
@@ -238,6 +247,17 @@ impl Config {
             }
             if !seen.insert(host.name.as_str()) {
                 return Err(Error::Config(format!("duplicate host name {}", host.name)));
+            }
+            // A relative root matches no absolute input, so the host would
+            // silently take no job at all.
+            for root in &host.reads {
+                if !root.is_absolute() {
+                    return Err(Error::Config(format!(
+                        "host {}: reads {} must be an absolute path",
+                        host.name,
+                        root.display()
+                    )));
+                }
             }
             if host.local {
                 // Each of these would be silently ignored, so refuse instead.
@@ -504,6 +524,28 @@ LD_LIBRARY_PATH = "/opt/driver/lib"
         );
         drop((first, second));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_relative_reads_entry_is_a_config_error() {
+        let err = Config::from_toml("[[hosts]]\nname = \"w\"\nreads = [\"media\"]\n").unwrap_err();
+        let text = err.to_string();
+        assert!(
+            matches!(err, Error::Config(ref t) if t.contains("absolute")),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn reads_and_prefer_default_to_accept_anything_and_no_preference() {
+        let cfg = Config::from_toml("[[hosts]]\nname = \"w\"\n").unwrap();
+        assert!(cfg.hosts[0].reads.is_empty());
+        assert_eq!(cfg.hosts[0].prefer, 0);
+        let set =
+            Config::from_toml("[[hosts]]\nname = \"w\"\nreads = [\"/mnt/archive\"]\nprefer = 10\n")
+                .unwrap();
+        assert_eq!(set.hosts[0].reads, vec![PathBuf::from("/mnt/archive")]);
+        assert_eq!(set.hosts[0].prefer, 10);
     }
 
     #[test]

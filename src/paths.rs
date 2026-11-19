@@ -9,7 +9,7 @@
 //! matches no rule comes back as it went in.
 
 use crate::Host;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
@@ -18,13 +18,60 @@ use std::path::Path;
 const FILE_PREFIX: &[u8] = b"file:";
 
 /// Rewrite a client path for the worker.
-pub fn to_worker(host: &Host, path: &OsString) -> OsString {
+pub fn to_worker(host: &Host, path: &OsStr) -> OsString {
     map_arg(host, path)
+}
+
+/// The path inside a `file:` token, without the scheme and without the .NET
+/// quotes.
+fn input_path(arg: &OsStr) -> &OsStr {
+    let bytes = arg.as_bytes();
+    let rest = bytes.strip_prefix(FILE_PREFIX).unwrap_or(bytes);
+    let unquoted = rest
+        .strip_prefix(b"\"")
+        .and_then(|inner| inner.strip_suffix(b"\""));
+    OsStr::from_bytes(unquoted.unwrap_or(rest))
+}
+
+/// Does this host declare where it can read? An empty list accepts anything,
+/// which is what a config written before `reads` means (ADR 0030).
+pub fn reads_inputs(host: &Host, args: &[OsString]) -> bool {
+    host.reads.is_empty() || input_args(args).iter().all(|arg| readable(host, arg))
+}
+
+/// One input under one of the host's roots, after the same rewrite a job
+/// gets. A token that is not an absolute path (a URL, `pipe:0`, a relative
+/// name) is no root this rule can speak about, so it passes.
+fn readable(host: &Host, arg: &OsStr) -> bool {
+    let mapped = rewrite(host, input_path(arg));
+    let path = Path::new(&mapped);
+    !path.is_absolute() || host.reads.iter().any(|root| path.starts_with(root))
+}
+
+/// Every input value: the argument after `-i`, and the attached form
+/// (`-i/home/alice/film.mkv`) a caller can build by concatenation.
+fn input_args(args: &[OsString]) -> Vec<&OsStr> {
+    let mut out = Vec::new();
+    let mut take_next = false;
+    for arg in args {
+        let bytes = arg.as_bytes();
+        if take_next {
+            out.push(arg.as_os_str());
+            take_next = false;
+        } else if bytes == b"-i" {
+            take_next = true;
+        } else if let Some(rest) = bytes.strip_prefix(b"-i")
+            && (rest.starts_with(b"/") || rest.starts_with(FILE_PREFIX))
+        {
+            out.push(OsStr::from_bytes(rest));
+        }
+    }
+    out
 }
 
 /// Maps a whole argument: a bare path, or a `file:` token with the path inside.
 /// Other schemes (`http://`, `pipe:`, `-vf`) are left alone.
-fn map_arg(host: &Host, arg: &OsString) -> OsString {
+fn map_arg(host: &Host, arg: &OsStr) -> OsString {
     let bytes = arg.as_bytes();
     let Some(rest) = bytes.strip_prefix(FILE_PREFIX) else {
         return rewrite(host, arg);
@@ -47,7 +94,7 @@ fn map_arg(host: &Host, arg: &OsString) -> OsString {
 }
 
 /// Rewrites `from` -> `to` at the longest matching rule.
-fn rewrite(host: &Host, path: &OsString) -> OsString {
+fn rewrite(host: &Host, path: &OsStr) -> OsString {
     let path = Path::new(path);
     let mut best: Option<(&Path, &Path)> = None;
     let mut best_key = (0usize, 0usize);
@@ -106,6 +153,8 @@ mod tests {
                     to: PathBuf::from(to),
                 })
                 .collect(),
+            reads: Vec::new(),
+            prefer: 0,
         }
     }
 
@@ -285,5 +334,66 @@ mod tests {
             os("/home/alice/media/film.mkv")
         );
         assert_eq!(to_worker(&h, &os("/home/alice")), os("/home/alice"));
+    }
+
+    fn with_reads(mut h: Host, roots: &[&str]) -> Host {
+        h.reads = roots.iter().map(PathBuf::from).collect();
+        h
+    }
+
+    fn argv(list: &[&str]) -> Vec<OsString> {
+        list.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn a_host_without_reads_accepts_any_input() {
+        let h = production();
+        assert!(reads_inputs(
+            &h,
+            &argv(&["-i", "file:/home/alice/media/film.mkv"])
+        ));
+        assert!(reads_inputs(&h, &argv(&["-c:v", "libx264"])));
+    }
+
+    #[test]
+    fn reads_are_matched_after_the_path_map() {
+        // The map moves the media to /home/bob/media, and `reads` is written
+        // in the host's own namespace, so the client root covers nothing.
+        let h = with_reads(production(), &["/home/alice/media"]);
+        assert!(!reads_inputs(
+            &h,
+            &argv(&["-i", "file:/home/alice/media/a.mkv"])
+        ));
+        let ok = with_reads(production(), &["/home/bob/media"]);
+        assert!(reads_inputs(
+            &ok,
+            &argv(&["-i", "file:/home/alice/media/a.mkv"])
+        ));
+    }
+
+    #[test]
+    fn one_unreadable_input_excludes_the_host() {
+        let h = with_reads(production(), &["/home/bob/media"]);
+        assert!(!reads_inputs(
+            &h,
+            &argv(&["-i", "/home/alice/media/a.mkv", "-i", "/srv/other/b.mkv"])
+        ));
+    }
+
+    #[test]
+    fn a_stream_is_not_a_root_this_rule_judges() {
+        let h = with_reads(production(), &["/home/bob/media"]);
+        assert!(reads_inputs(
+            &h,
+            &argv(&["-i", "http://example.invalid/a.m3u8"])
+        ));
+        assert!(reads_inputs(&h, &argv(&["-i", "pipe:0"])));
+    }
+
+    #[test]
+    fn the_attached_i_form_is_read_too() {
+        let h = with_reads(production(), &["/home/bob/media"]);
+        assert!(reads_inputs(&h, &argv(&["-i/home/alice/media/a.mkv"])));
+        assert!(!reads_inputs(&h, &argv(&["-i/srv/elsewhere/a.mkv"])));
     }
 }

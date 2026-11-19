@@ -173,28 +173,31 @@ pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// What the probe runs on the worker. Without path mapping the host only has
-/// to answer. With mapping, every mapped root must stat within 5 s, so a
-/// dropped FUSE mount marks the host down instead of failing each job with
-/// ENOENT, and a hung mount cannot stall the janitor cycle.
+/// What the probe runs on the worker. Without a root to check the host only
+/// has to answer. Otherwise every mapped root and every declared `reads` root
+/// must stat within 5 s, so a dropped FUSE mount marks the host down instead of
+/// failing each job with ENOENT, and a hung mount cannot stall the janitor
+/// cycle.
 ///
 /// shortcut: only the root itself is checked, so an empty directory left by a
 /// mount that never came up still passes. Add a per-host sentinel path when
 /// that bites.
 fn probe_command(host: &Host) -> String {
-    if host.paths.is_empty() {
+    let mut checks: Vec<String> = Vec::new();
+    for root in host.paths.iter().map(|p| &p.to).chain(&host.reads) {
+        let check = format!(
+            "timeout 5 ls -d {} >/dev/null",
+            shell_quote(&root.to_string_lossy())
+        );
+        // A reads root that repeats a path target needs no second stat.
+        if !checks.contains(&check) {
+            checks.push(check);
+        }
+    }
+    if checks.is_empty() {
         return "true".into();
     }
-    host.paths
-        .iter()
-        .map(|p| {
-            format!(
-                "timeout 5 ls -d {} >/dev/null",
-                shell_quote(&p.to.to_string_lossy())
-            )
-        })
-        .collect::<Vec<String>>()
-        .join(" && ")
+    checks.join(" && ")
 }
 
 /// Copy one stream to this process's own, byte for byte and as it arrives,
@@ -657,6 +660,8 @@ mod tests {
             ssh_args: Vec::new(),
             env: std::collections::BTreeMap::new(),
             paths: vec![],
+            reads: Vec::new(),
+            prefer: 0,
         }
     }
 
@@ -1012,6 +1017,32 @@ mod tests {
             v[6],
             "timeout 5 ls -d '/home/bob/media' >/dev/null && \
              timeout 5 ls -d '/home/bob/transcode' >/dev/null"
+        );
+    }
+
+    /// A host can declare a root it reads without mapping it, and a mount that
+    /// drops there must mark the host down the same way a path target does.
+    #[test]
+    fn the_probe_checks_a_declared_reads_root_without_a_path_map() {
+        let dir = fixture("probe-reads");
+        let _serial = crate::exclusive();
+        let argv = dir.join("argv");
+        let s = ssh(fake_exit_ssh(&dir, &argv, 0), &dir);
+        let mut h = host();
+        h.reads = vec!["/mnt/archive".into()];
+        assert!(s.probe(&h));
+        let v = recorded(&argv);
+        assert_eq!(v[6], "timeout 5 ls -d '/mnt/archive' >/dev/null");
+
+        // Repeated by a path target, the root is stat'ed once.
+        h.paths = vec![PathMap {
+            from: "/archive".into(),
+            to: "/mnt/archive".into(),
+        }];
+        assert!(s.probe(&h));
+        assert_eq!(
+            recorded(&argv)[6],
+            "timeout 5 ls -d '/mnt/archive' >/dev/null"
         );
     }
 

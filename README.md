@@ -201,6 +201,7 @@ daemon on the worker.
 | Worker with no inbound reachability | SSH | The agent needs a listening port on the worker |
 | Worker that cannot keep a daemon running | SSH | Nothing to supervise on the worker |
 | Worker that must not run arbitrary argv | SSH | An agent token is remote code execution by design |
+| A title only one box can mount | `reads` on that host | Placement skips a host whose declared roots cover no input |
 | Client on a shared or spinning disk | SSH or agent, `state_dir` on tmpfs | One `fdatasync` on a contended disk can cost tens of milliseconds |
 
 Rules that apply once a worker is configured:
@@ -253,6 +254,13 @@ Rules that apply once a worker is configured:
    `local_ffprobe` on the client's own paths, and `rrffmpeg capabilities <name>`
    probes it without leaving the machine. Keep local mode (no `[[hosts]]`) when
    the client never sends anything out: it needs no state and no thread.
+9. A host that cannot read some media says so: `reads = ["/mnt/archive"]`,
+   written in the paths that host sees. Placement maps each `-i` value for the
+   candidate host before it asks, so a root written in client terms covers
+   nothing. Leave `reads` out and the host accepts any input, as before.
+   Ties no longer follow the order of the file: a job that needs no accelerator
+   prefers a host that needs no SSH, then a higher `prefer`, then the lower
+   load, then the host name.
 
 ```toml
 client_name = "client"

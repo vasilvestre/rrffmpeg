@@ -75,7 +75,8 @@ fn wait_within(limit: Duration, mut cond: impl FnMut() -> bool) -> bool {
 
 /// The first host fails before its child starts, so the retry runs on the
 /// second. The second exit code is the one the client returns, and the journal
-/// holds one Started row per attempt, with distinct ids.
+/// holds one Started row per attempt, with distinct ids. `prefer` puts the
+/// broken host first, because the placement order no longer follows the file.
 #[test]
 fn a_lost_handshake_moves_the_job_to_the_second_host() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -102,6 +103,7 @@ fn a_lost_handshake_moves_the_job_to_the_second_host() {
              [[hosts]]\n\
              name = \"worker\"\n\
              concurrency = 1\n\
+             prefer = 1\n\
              ffmpeg_bin = \"/nonexistent/ffmpeg-never-starts\"\n\
              agent_addr = \"{first}\"\n\
              \n\

@@ -28,5 +28,7 @@ pub fn host(name: &str, concurrency: usize) -> rrffmpeg::Host {
         ssh_args: Vec::new(),
         env: std::collections::BTreeMap::new(),
         paths: Vec::new(),
+        reads: Vec::new(),
+        prefer: 0,
     }
 }

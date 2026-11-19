@@ -50,6 +50,8 @@ fn setup() -> (Arc<rrffmpeg::config::Host>, Agent, PathBuf) {
         ssh_args: Vec::new(),
         env: std::collections::BTreeMap::new(),
         paths: vec![],
+        reads: Vec::new(),
+        prefer: 0,
     };
     let agent = Agent::load(TOKEN.into(), &dir.join("cert.pem")).expect("agent");
     (Arc::new(host), agent, dir)
@@ -171,6 +173,8 @@ fn dispatch_latency_ssh() {
         ssh_args: Vec::new(),
         env: std::collections::BTreeMap::new(),
         paths: vec![],
+        reads: Vec::new(),
+        prefer: 0,
     });
     let ssh = rrffmpeg::transport::Ssh::new(PathBuf::from("ssh"));
     main_note();
@@ -379,6 +383,8 @@ fn worker() -> Host {
         ssh_args: Vec::new(),
         env: std::collections::BTreeMap::new(),
         paths: Vec::new(),
+        reads: Vec::new(),
+        prefer: 0,
     }
 }
 
@@ -514,6 +520,8 @@ fn arg_and_stderr_cost() {
                 to: "/home/bob/transcode".into(),
             },
         ],
+        reads: Vec::new(),
+        prefer: 0,
     };
     // The shape of a real Jellyfin call: two mapped inputs, one output, and
     // the flags between them that match no rule.

@@ -1012,6 +1012,8 @@ mod tests {
             ssh_args: Vec::new(),
             env: std::collections::BTreeMap::new(),
             paths: vec![],
+            reads: Vec::new(),
+            prefer: 0,
         }
     }
 

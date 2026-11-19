@@ -37,6 +37,8 @@ fn worker() -> Host {
         ssh_args: Vec::new(),
         env: BTreeMap::new(),
         paths: Vec::new(),
+        reads: Vec::new(),
+        prefer: 0,
     }
 }
 

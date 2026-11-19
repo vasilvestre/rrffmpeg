@@ -6,6 +6,7 @@
 use crate::Host;
 use crate::Job;
 use crate::locks::{LockDir, SlotGuard};
+use crate::paths;
 use crate::queue::{Lane, Queue};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -73,22 +74,19 @@ impl Scheduler {
         self
     }
 
-    /// Reserve a slot on the eligible host with the lowest running/concurrency
-    /// ratio, first in config order on ties.
+    /// Reserve a slot on the eligible host with the best placement order, see
+    /// [`beats`].
     pub fn acquire(&self, job: &Job) -> Option<Lease> {
         // Someone already waits for a slot this job could use, so queue up
         // behind them. A caller that skips this takes the slot a waiter slept
         // through, and a stream of fresh callers can starve it for good.
         for host in &self.hosts {
-            if !self.locks.is_down(&host.name)
-                && self.capability_ok(host, job.capabilities.as_slice())
-                && self.queue.has_waiters(&host.name)
-            {
+            if self.eligible(host, job) && self.queue.has_waiters(&host.name) {
                 return None;
             }
         }
         for _ in 0..ACQUIRE_PASSES {
-            let index = self.pick_host(job.capabilities.as_slice())?;
+            let index = self.pick_host(job)?;
             let host = &self.hosts[index];
             if let Some(guard) = self.locks.try_acquire(host, &job.id) {
                 return Some(Lease {
@@ -126,7 +124,7 @@ impl Scheduler {
                 }
                 refresh_due = Instant::now() + REFRESH_EVERY;
             }
-            if let Some(index) = self.pick_host(job.capabilities.as_slice()) {
+            if let Some(index) = self.pick_host(job) {
                 // A free slot means the queue is draining now, so poll fast
                 // even if a ticket still ranks ahead: otherwise a job sleeps
                 // through its own turn at the backoff rate, and a loaded
@@ -164,7 +162,7 @@ impl Scheduler {
     fn lanes(&self, job: &Job) -> HashMap<String, Lane> {
         let mut lanes = HashMap::new();
         for host in &self.hosts {
-            if self.is_down(&host.name) || !self.capability_ok(host, job.capabilities.as_slice()) {
+            if !self.eligible(host, job) {
                 continue;
             }
             let lane = self
@@ -208,15 +206,20 @@ impl Scheduler {
             || need.iter().all(|n| host.capabilities.contains(n))
     }
 
-    /// Best eligible host with a free slot, or None. A down host is never
-    /// eligible.
-    fn pick_host(&self, capability: &[String]) -> Option<usize> {
+    /// A host that is up, advertises every token the job needs and declares a
+    /// root for every input. Slots are checked separately: a full host still
+    /// earns a ticket.
+    fn eligible(&self, host: &Host, job: &Job) -> bool {
+        !self.locks.is_down(&host.name)
+            && self.capability_ok(host, job.capabilities.as_slice())
+            && paths::reads_inputs(host, &job.args)
+    }
+
+    /// Best eligible host with a free slot, or None.
+    fn pick_host(&self, job: &Job) -> Option<usize> {
         let mut best: Option<(usize, usize)> = None;
         for (index, host) in self.hosts.iter().enumerate() {
-            if self.locks.is_down(&host.name) {
-                continue;
-            }
-            if !self.capability_ok(host, capability) {
+            if !self.eligible(host, job) {
                 continue;
             }
             let running = self.locks.occupancy(host);
@@ -226,10 +229,7 @@ impl Scheduler {
             best = match best {
                 None => Some((index, running)),
                 Some((current, current_running)) => {
-                    let cur = &self.hosts[current];
-                    let candidate = running as u128 * cur.concurrency as u128;
-                    let incumbent = current_running as u128 * host.concurrency as u128;
-                    if candidate < incumbent {
+                    if beats(host, running, &self.hosts[current], current_running, job) {
                         Some((index, running))
                     } else {
                         Some((current, current_running))
@@ -239,6 +239,39 @@ impl Scheduler {
         }
         best.map(|(index, _)| index)
     }
+}
+
+/// Whether `host` beats `incumbent` for this job: a host that needs no ssh
+/// when the job needs no accelerator, then a higher `prefer`, then the lower
+/// running/concurrency ratio, then the name. Declaration order is never a
+/// rule, so swapping two `[[hosts]]` blocks changes nothing (ADR 0031).
+fn beats(
+    host: &Host,
+    running: usize,
+    incumbent: &Host,
+    incumbent_running: usize,
+    job: &Job,
+) -> bool {
+    if job.capabilities.is_empty() {
+        let direct = needs_no_ssh(host);
+        if direct != needs_no_ssh(incumbent) {
+            return direct;
+        }
+    }
+    if host.prefer != incumbent.prefer {
+        return host.prefer > incumbent.prefer;
+    }
+    let candidate = running as u128 * incumbent.concurrency as u128;
+    let current = incumbent_running as u128 * host.concurrency as u128;
+    if candidate != current {
+        return candidate < current;
+    }
+    host.name < incumbent.name
+}
+
+/// No handshake, no remote shell: the client itself, or an agent socket.
+fn needs_no_ssh(host: &Host) -> bool {
+    host.local || host.agent_addr.is_some()
 }
 
 /// First wait before the next slot retry.
@@ -283,6 +316,8 @@ mod tests {
             ssh_args: Vec::new(),
             env: std::collections::BTreeMap::new(),
             paths: Vec::new(),
+            reads: Vec::new(),
+            prefer: 0,
         }
     }
 
@@ -293,6 +328,17 @@ mod tests {
             args: Vec::new(),
             priority,
             capabilities: capability.iter().map(|c| c.to_string()).collect(),
+        }
+    }
+
+    /// A job with a real input, so `reads` has something to judge.
+    fn input_job(input: &str, capability: &[&str]) -> Job {
+        Job {
+            args: vec![
+                std::ffi::OsString::from("-i"),
+                std::ffi::OsString::from(input),
+            ],
+            ..job(0, capability)
         }
     }
 
@@ -369,6 +415,126 @@ mod tests {
         let lease = open.acquire(&job(0, &["qsv"])).expect("a lease");
         assert_eq!(lease.host.name, "open");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The production failure: the host that held no root for the input took
+    /// the job, ffmpeg exited 254, and nothing retried it.
+    #[test]
+    fn an_input_the_first_host_cannot_read_lands_on_the_second() {
+        let (dir, locks) = scratch("reads");
+        let _serial = crate::exclusive();
+        let scheduler = Scheduler::new(
+            vec![
+                // Declared first, and it reads only the client's media root.
+                readable(host("gpu", 1, &[]), &["/home/bob/media"]),
+                // Declared second, and it holds the archive under another root.
+                readable(archive(), &["/mnt/archive"]),
+            ],
+            locks,
+            Duration::from_secs(60),
+        );
+        let lease = scheduler
+            .acquire(&input_job("file:/archive/film.mkv", &[]))
+            .expect("the second host can read it");
+        assert_eq!(lease.host.name, "archive");
+        drop(lease);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Two orders, one answer: file order is not a routing rule.
+    #[test]
+    fn swapping_two_host_blocks_does_not_change_the_host() {
+        let _serial = crate::exclusive();
+        for flip in [false, true] {
+            let (dir, locks) = scratch("swap");
+            let gpu = readable(host("gpu", 1, &[]), &["/home/bob/media"]);
+            let archive = readable(archive(), &["/mnt/archive"]);
+            let hosts = if flip {
+                vec![archive, gpu]
+            } else {
+                vec![gpu, archive]
+            };
+            let scheduler = Scheduler::new(hosts, locks, Duration::from_secs(60));
+            let lease = scheduler
+                .acquire(&input_job("file:/archive/film.mkv", &[]))
+                .expect("a lease");
+            assert_eq!(lease.host.name, "archive", "flip {flip}");
+            drop(lease);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// The declared preference wins over the name, and the name breaks a full
+    /// tie, so no order of the blocks can change the answer.
+    #[test]
+    fn prefer_orders_equal_hosts_and_the_name_breaks_a_full_tie() {
+        let _serial = crate::exclusive();
+        for flip in [false, true] {
+            let (dir, locks) = scratch("prefer");
+            let mut alpha = host("alpha", 1, &[]);
+            alpha.prefer = 0;
+            let mut zulu = host("zulu", 1, &[]);
+            zulu.prefer = 10;
+            let hosts = if flip {
+                vec![zulu.clone(), alpha.clone()]
+            } else {
+                vec![alpha.clone(), zulu.clone()]
+            };
+            let scheduler = Scheduler::new(hosts, locks, Duration::from_secs(60));
+            let lease = scheduler.acquire(&job(0, &[])).expect("a lease");
+            assert_eq!(lease.host.name, "zulu", "higher prefer wins, flip {flip}");
+            drop(lease);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        let (dir, locks) = scratch("name-tie");
+        let scheduler = Scheduler::new(
+            vec![host("zulu", 1, &[]), host("alpha", 1, &[])],
+            locks,
+            Duration::from_secs(60),
+        );
+        let lease = scheduler.acquire(&job(0, &[])).expect("a lease");
+        assert_eq!(lease.host.name, "alpha");
+        drop(lease);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A software encode needs nothing from the network, so it stays where it
+    /// is even when the worker holds the only GPU.
+    #[test]
+    fn a_software_job_with_a_local_host_stays_local() {
+        let (dir, locks) = scratch("local-x264");
+        let _serial = crate::exclusive();
+        let mut here = host("client", 1, &["vaapi"]);
+        here.local = true;
+        let scheduler = Scheduler::new(
+            vec![host("n100", 2, &["vaapi", "nvenc"]), here],
+            locks,
+            Duration::from_secs(60),
+        );
+        let lease = scheduler
+            .acquire(&input_job("/home/alice/film.mkv", &[]))
+            .expect("a lease");
+        assert_eq!(lease.host.name, "client", "libx264 stays on the client");
+        drop(lease);
+        let lease = scheduler.acquire(&job(0, &["nvenc"])).expect("a lease");
+        assert_eq!(lease.host.name, "n100", "an nvenc job still goes out");
+        drop(lease);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn readable(mut host: Host, roots: &[&str]) -> Host {
+        host.reads = roots.iter().map(std::path::PathBuf::from).collect();
+        host
+    }
+
+    /// A host that mounts the client's `/archive` under `/mnt/archive`.
+    fn archive() -> Host {
+        let mut host = host("archive", 1, &[]);
+        host.paths = vec![crate::config::PathMap {
+            from: "/archive".into(),
+            to: "/mnt/archive".into(),
+        }];
+        host
     }
 
     #[test]

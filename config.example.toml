@@ -70,6 +70,21 @@ concurrency = 2
 # vaapi_vpp, qsv, qsv_av1, nvenc, nvenc_av1.
 capabilities = ["vaapi", "vaapi_hevc"]
 
+# The roots this host can open, as the host sees them, after its own path maps.
+# A job whose input lies under none of them is never placed here, so a title
+# that only one machine mounts lands on that machine. Several inputs must all
+# be covered. A stream (`http://`, `pipe:0`) is not judged.
+# Each root must also stat on the host within 5 s during the janitor probe, so
+# a dropped mount marks the host down instead of failing every job.
+# Leave it out and the host accepts any input, which is what a config written
+# before this key means.
+# reads = ["/home/bob/media"]
+
+# Placement preference among otherwise equal hosts: higher wins, default 0.
+# It never overrides a missing token, a root the host cannot read, a down host
+# or a full host. Use it to say which host to fill first.
+# prefer = 0
+
 # Skip ssh for this host and talk to `rrffmpeg-agent` instead. Hosts without
 # this line keep using ssh, which needs nothing installed on the worker.
 # agent_addr = "worker:9876"
