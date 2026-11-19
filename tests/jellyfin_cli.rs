@@ -75,6 +75,54 @@ fn a_setting_no_worker_proves_exits_one_and_says_so_in_json() {
 }
 
 #[test]
+fn the_table_names_what_is_proved_and_what_is_not() {
+    let root = dir("table");
+    let (config, encoding) = setup(&root, "\"vaapi\", \"vaapi_hevc\"", VAAPI_XML);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rrffmpeg"))
+        .args(["jellyfin", "--path"])
+        .arg(&encoding)
+        .env("RRFFMPEG_CONFIG", &config)
+        .output()
+        .expect("rrffmpeg starts");
+    assert_eq!(out.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("encoding.xml: "), "{stdout}");
+    assert!(stdout.contains("setting"), "{stdout}");
+    assert!(stdout.contains("proved: "), "{stdout}");
+    assert!(stdout.contains("AllowHevcEncoding"), "{stdout}");
+    assert!(stdout.contains("not proved: "), "{stdout}");
+    assert!(stdout.contains("AllowAv1Encoding"), "{stdout}");
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn jellyfins_config_dir_is_searched_without_a_path() {
+    let root = dir("env");
+    let (config, encoding) = setup(&root, "\"vaapi\", \"vaapi_hevc\"", VAAPI_XML);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rrffmpeg"))
+        .args(["jellyfin", "--json"])
+        .env("RRFFMPEG_CONFIG", &config)
+        .env("JELLYFIN_CONFIG_DIR", &root)
+        .env_remove("XDG_CONFIG_HOME")
+        .output()
+        .expect("rrffmpeg starts");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("json output");
+    assert_eq!(
+        value["encoding_xml"],
+        encoding.display().to_string(),
+        "{stdout}"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn an_unknown_argument_is_refused() {
     let root = dir("arg");
     let (config, encoding) = setup(&root, "\"vaapi\"", VAAPI_XML);

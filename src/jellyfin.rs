@@ -329,11 +329,7 @@ fn row(workers: &[Worker], setting: &str, value: &str, tokens: Vec<String>) -> R
     Row {
         setting: setting.into(),
         value: value.into(),
-        needs: if tokens.is_empty() {
-            "-".into()
-        } else {
-            tokens.join(", ")
-        },
+        needs: tokens.join(", "),
         verdict,
         detail,
     }
@@ -366,9 +362,6 @@ fn judge(workers: &[Worker], tokens: &[String]) -> (&'static str, String) {
             "broken",
             "no worker declared, so a hardware job has nowhere to run".into(),
         );
-    }
-    if tokens.is_empty() {
-        return ("ok", "software path, any worker runs it".into());
     }
     let ok: Vec<&str> = workers
         .iter()
@@ -781,6 +774,196 @@ mod tests {
             Err(Error::Config(_))
         ));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_truncated_file_stops_instead_of_looping() {
+        // An unterminated comment, declaration, closer or empty tag name must
+        // end the scan instead of spinning on the same offset.
+        assert!(parse("<!-- no end").0.is_empty());
+        assert!(parse("<EncodingOptions><!-- no end").0.is_empty());
+        assert!(parse("<!DOCTYPE").0.is_empty());
+        assert!(parse("</EncodingOptions").0.is_empty());
+        assert!(parse("<>").0.is_empty());
+        let s = settings("<!-- a > inside --><EncodingThreadCount>-1</EncodingThreadCount>");
+        assert_eq!(s.text("EncodingThreadCount"), Some("-1"));
+    }
+
+    #[test]
+    fn software_only_needs_no_token_and_disabled_hardware_encoding_is_said() {
+        let none = settings(
+            "<EncodingOptions><HardwareAccelerationType>none</HardwareAccelerationType></EncodingOptions>",
+        );
+        let rows = super::rows(
+            &none,
+            &[worker("w", &["vaapi"])],
+            capabilities::DEFAULT_VAAPI_DEVICE,
+        );
+        let accel = rows
+            .iter()
+            .find(|r| r.setting == "HardwareAccelerationType")
+            .unwrap();
+        assert_eq!(accel.verdict, "ok");
+        assert!(accel.detail.contains("software only"), "{}", accel.detail);
+
+        let off = settings(
+            "<EncodingOptions><HardwareAccelerationType>vaapi</HardwareAccelerationType>\
+             <EnableHardwareEncoding>false</EnableHardwareEncoding></EncodingOptions>",
+        );
+        let rows = super::rows(
+            &off,
+            &[worker("w", &["vaapi"])],
+            capabilities::DEFAULT_VAAPI_DEVICE,
+        );
+        assert_eq!(rows[0].verdict, "ok");
+        assert!(rows[0].detail.contains("software on the client"));
+        assert!(rows[0].detail.contains("do not apply"));
+    }
+
+    #[test]
+    fn a_family_rrffmpeg_has_no_token_for_reads_unknown() {
+        let amf = settings(
+            "<EncodingOptions><HardwareAccelerationType>amf</HardwareAccelerationType></EncodingOptions>",
+        );
+        let rows = super::rows(
+            &amf,
+            &[worker("w", &["vaapi"])],
+            capabilities::DEFAULT_VAAPI_DEVICE,
+        );
+        let accel = rows
+            .iter()
+            .find(|r| r.setting == "HardwareAccelerationType")
+            .unwrap();
+        assert_eq!(accel.verdict, "unknown");
+        assert_eq!(accel.value, "amf");
+        assert!(accel.detail.contains("no amf token"), "{}", accel.detail);
+    }
+
+    #[test]
+    fn a_family_the_probe_does_not_test_reads_unknown() {
+        let qsv = settings(
+            "<EncodingOptions><HardwareAccelerationType>qsv</HardwareAccelerationType>\
+             <AllowHevcEncoding>true</AllowHevcEncoding>\
+             <EnableDecodingColorDepth10Hevc>true</EnableDecodingColorDepth10Hevc>\
+             <EnableTonemapping>true</EnableTonemapping></EncodingOptions>",
+        );
+        let rows = super::rows(
+            &qsv,
+            &[worker("q", &["qsv", "qsv_av1"])],
+            capabilities::DEFAULT_VAAPI_DEVICE,
+        );
+        // 8-bit HEVC on qsv needs only the family, and the row is `ok`.
+        let hevc = rows
+            .iter()
+            .find(|r| r.setting == "AllowHevcEncoding")
+            .unwrap();
+        assert_eq!(hevc.verdict, "ok");
+        assert_eq!(hevc.needs, "qsv");
+        let depth = rows
+            .iter()
+            .find(|r| r.setting == "EnableDecodingColorDepth10Hevc")
+            .unwrap();
+        assert_eq!(depth.verdict, "unknown");
+        assert_eq!(depth.needs, "-");
+        let tone = rows
+            .iter()
+            .find(|r| r.setting == "EnableTonemapping")
+            .unwrap();
+        assert_eq!(tone.verdict, "unknown");
+        assert!(tone.detail.contains("tonemap_opencl"), "{}", tone.detail);
+    }
+
+    #[test]
+    fn no_declared_worker_makes_every_hardware_row_broken() {
+        let s = settings(&vaapi_xml(
+            "<TranscodingTempPath>/dev/shm/jellyfin-transcode</TranscodingTempPath>",
+        ));
+        let rows = super::rows(&s, &[], capabilities::DEFAULT_VAAPI_DEVICE);
+        let accel = rows
+            .iter()
+            .find(|r| r.setting == "HardwareAccelerationType")
+            .unwrap();
+        assert_eq!(accel.verdict, "broken");
+        assert!(accel.detail.contains("no worker declared"));
+        let temp = rows
+            .iter()
+            .find(|r| r.setting == "TranscodingTempPath")
+            .unwrap();
+        assert_eq!(temp.verdict, "broken");
+        assert_eq!(temp.detail, "no worker declared");
+    }
+
+    #[test]
+    fn a_temp_path_no_map_covers_reads_broken() {
+        let s = settings(&vaapi_xml(
+            "<TranscodingTempPath>/var/tmp/elsewhere</TranscodingTempPath>",
+        ));
+        let rows = super::rows(
+            &s,
+            &[worker("w", &["vaapi"])],
+            capabilities::DEFAULT_VAAPI_DEVICE,
+        );
+        let temp = rows
+            .iter()
+            .find(|r| r.setting == "TranscodingTempPath")
+            .unwrap();
+        assert_eq!(temp.verdict, "broken");
+        assert!(
+            temp.detail.contains("no path map covers"),
+            "{}",
+            temp.detail
+        );
+        assert_eq!(temp.value, "/var/tmp/elsewhere");
+        assert_eq!(temp.needs, "path map");
+    }
+
+    #[test]
+    fn a_temp_path_one_worker_does_not_map_reads_partial() {
+        let s = settings(&vaapi_xml(
+            "<TranscodingTempPath>/dev/shm/jellyfin-transcode</TranscodingTempPath>",
+        ));
+        let mut bare = worker("bare", &["vaapi"]);
+        bare.paths.clear();
+        let rows = super::rows(
+            &s,
+            &[worker("mapped", &["vaapi"]), bare],
+            capabilities::DEFAULT_VAAPI_DEVICE,
+        );
+        let temp = rows
+            .iter()
+            .find(|r| r.setting == "TranscodingTempPath")
+            .unwrap();
+        assert_eq!(temp.verdict, "partial");
+        assert!(temp.detail.contains("covered on mapped"), "{}", temp.detail);
+        assert!(temp.detail.contains("does not have"), "{}", temp.detail);
+    }
+
+    #[test]
+    fn a_vaapi_device_the_probe_did_not_test_reads_unknown() {
+        let s = settings(&vaapi_xml("<VaapiDevice>/dev/dri/renderD129</VaapiDevice>"));
+        let rows = super::rows(
+            &s,
+            &[worker("w", &["vaapi"])],
+            capabilities::DEFAULT_VAAPI_DEVICE,
+        );
+        let row = rows.iter().find(|r| r.setting == "VaapiDevice").unwrap();
+        assert_eq!(row.verdict, "unknown");
+        assert!(
+            row.detail.contains("--device /dev/dri/renderD129"),
+            "{}",
+            row.detail
+        );
+    }
+
+    #[test]
+    fn a_thread_count_of_minus_one_is_fine_on_a_single_slot_host() {
+        let s = settings(&vaapi_xml("<EncodingThreadCount>-1</EncodingThreadCount>"));
+        let rows = super::rows(
+            &s,
+            &[worker("one", &["vaapi"])],
+            capabilities::DEFAULT_VAAPI_DEVICE,
+        );
+        assert!(!rows.iter().any(|r| r.setting == "EncodingThreadCount"));
     }
 
     #[test]
