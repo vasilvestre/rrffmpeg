@@ -86,7 +86,7 @@ pub enum Event {
         host: String,
         /// Microseconds from process start to this append, on a monotonic
         /// clock. It is the dispatcher's own share of the start: config, the
-        /// journal replay, the slot file. The transport comes after.
+        /// slot file. The transport comes after.
         ///
         /// Defaulted: journals written before this field existed must keep
         /// replaying, and their dispatch time was never measured.

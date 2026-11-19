@@ -415,7 +415,8 @@ tmpfs    2.2 ms
 
 Read it as: the filesystem costs 0.54 ms p50 on a fresh journal and 2.25 ms at
 the cap. The replay costs about 50 ms on both. So the disk is not what the
-budget is spent on, and tmpfs does not buy back the replay.
+budget is spent on, and tmpfs does not buy back the replay. (Those 8 MiB rows
+predate the 2026-11-19 fix below: dispatch no longer replays at all.)
 
 Two limits stay. A shared or spinning disk is not in these rows: one
 `fdatasync` there costs tens of milliseconds, and that is the case where tmpfs
@@ -427,6 +428,28 @@ To repeat: point two configs at an nvme directory and at `/dev/shm`, run
 `rrffmpeg -version` calls with `$EPOCHREALTIME` around each one. Set
 `ffmpeg_bin = "/bin/true"` in `[[hosts]]` to keep the codec work out, and leave
 it out for the real ffmpeg rows.
+
+
+## The replay came back on the dispatch path, then left again
+
+Between ADR 0015 and 2026-11-19 the `started` event read `in_flight` from
+`Journal::active_on`, which ran the full replay on every dispatch. The janitor
+still slept through short jobs, so a process paid the replay and never used it.
+`in_flight` now comes from the slot locks the lease already holds, and dispatch
+never calls `active_on`.
+
+Same box, `ssh_bin = "/bin/true"`, synthetic `finished` records, state
+directory on `/dev/shm`, n=200 for the empty journal and n=20 for the filled
+one:
+
+| Journal on disk | Dispatch, before | Dispatch, after |
+|---|---|---|
+| empty | 2.1 ms | 1.8 ms |
+| 6.7 MB | 35.8 ms | 1.95 ms |
+
+A journal at the rotation cap now costs a dispatch nothing. The janitor still
+pays the one-time replay in a process that lives past one interval, off the
+dispatch path.
 
 
 ## Resources per job

@@ -192,6 +192,13 @@ impl Scheduler {
         self.locks.is_down(host)
     }
 
+    /// Jobs running on `host` right now, this one included. Reads the slot
+    /// locks rather than the journal, so recording a start never replays the
+    /// journal on the dispatch path.
+    pub fn running(&self, host: &Host) -> usize {
+        self.locks.occupancy(host)
+    }
+
     /// Every capability the job needs must be advertised. One match is not
     /// enough: a host that encodes H.264 in hardware can still lack 10-bit
     /// HEVC or tone mapping.
@@ -360,6 +367,22 @@ mod tests {
         let (dir, open) = build(vec![host("open", 1, &[])], "open");
         let lease = open.acquire(&job(0, &["qsv"])).expect("a lease");
         assert_eq!(lease.host.name, "open");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn running_counts_the_held_lease() {
+        let (dir, scheduler) = build(vec![host("w", 2, &[])], "running");
+        let _serial = crate::exclusive();
+        let lease = scheduler.acquire(&job(0, &[])).expect("a lease");
+        let host = lease.host.clone();
+        // The lease already holds one slot, so the count includes this job.
+        assert_eq!(scheduler.running(&host), 1);
+        let second = scheduler.acquire(&job(0, &[])).expect("a second slot");
+        assert_eq!(scheduler.running(&host), 2);
+        drop(second);
+        drop(lease);
+        assert_eq!(scheduler.running(&host), 0);
         let _ = std::fs::remove_dir_all(dir);
     }
 

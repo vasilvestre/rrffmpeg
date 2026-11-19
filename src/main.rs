@@ -187,8 +187,9 @@ fn dispatch(
             host: lease.host.name.clone(),
             elapsed_us: start.elapsed().as_micros() as u64,
             program: mapped.program.binary().to_string(),
-            // This job is not in the journal yet, so the count is one short.
-            in_flight: journal.active_on(&lease.host.name) + 1,
+            // The lease already holds this job's slot, so the flock count is
+            // exact and needs no journal replay on the dispatch path.
+            in_flight: scheduler.running(&lease.host),
         });
 
         let started = std::time::Instant::now();
