@@ -193,14 +193,13 @@ fn probe_command(host: &Host) -> String {
         .join(" && ")
 }
 
-/// Copy one stream to this process's own, byte for byte and as it arrives.
-/// `tap` also feeds the progress parser: ffmpeg writes the job's fps and speed
-/// on stderr, so the only way to keep them is to read the stream that
-/// `inherit` used to hand straight to Jellyfin.
+/// Copy one stream to this process's own, byte for byte and as it arrives,
+/// and feed the progress parser: ffmpeg writes the job's fps and speed on
+/// stderr, so the only way to keep them is to read the stream that `inherit`
+/// used to hand straight to Jellyfin.
 fn relay(
     mut src: impl Read + Send + 'static,
     mut dst: impl Write + Send + 'static,
-    tap: bool,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut buf = vec![0u8; 16 * 1024];
@@ -208,9 +207,7 @@ fn relay(
             match src.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if tap {
-                        crate::progress::feed(&buf[..n]);
-                    }
+                    crate::progress::feed(&buf[..n]);
                     if dst.write_all(&buf[..n]).is_ok() {
                         let _ = dst.flush();
                     }
@@ -238,23 +235,31 @@ impl Transport for Ssh {
             .arg(&host.name)
             .arg(&remote)
             .stdin(Stdio::inherit())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            // Only the tapped stream is piped. The other inherits this
+            // process's fd, so the kernel copies it and no relay thread runs.
+            .stdout(if stderr_as_stdout {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
+            .stderr(if stderr_as_stdout {
+                Stdio::inherit()
+            } else {
+                Stdio::piped()
+            })
             .spawn()
             .map_err(|e| Error::Io(e, format!("running {}", self.ssh_bin.display())))?;
         // With `stderr_as_stdout` the worker merges its stderr into stdout, so
         // the tapped stream is the other one.
-        let mut relays = Vec::with_capacity(2);
-        if let Some(out) = child.stdout.take() {
-            relays.push(relay(out, std::io::stdout(), stderr_as_stdout));
-        }
-        if let Some(err) = child.stderr.take() {
-            relays.push(relay(err, std::io::stderr(), !stderr_as_stdout));
-        }
+        let relay = if stderr_as_stdout {
+            child.stdout.take().map(|out| relay(out, std::io::stdout()))
+        } else {
+            child.stderr.take().map(|err| relay(err, std::io::stderr()))
+        };
         let status = child
             .wait()
             .map_err(|e| Error::Io(e, format!("waiting on {}", self.ssh_bin.display())))?;
-        for relay in relays {
+        if let Some(relay) = relay {
             let _ = relay.join();
         }
         // Exit code 255 is ssh's own failure (unreachable host, dropped link),
