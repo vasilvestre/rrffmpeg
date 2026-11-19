@@ -1,7 +1,7 @@
 //! Client to worker path rewriting.
 //!
 //! The worker mounts media at a different root than the client, and HLS
-//! segments come back through a second mount. Both directions matter.
+//! segments land in a second mount there.
 //!
 //! Rewriting works on `Path` components, never on `String`, so a media file
 //! whose name is not valid UTF-8 survives unchanged. Every rule is a plain
@@ -19,20 +19,15 @@ const FILE_PREFIX: &[u8] = b"file:";
 
 /// Rewrite a client path for the worker.
 pub fn to_worker(host: &Host, path: &OsString) -> OsString {
-    map_arg(host, path, true)
-}
-
-/// Rewrite a worker path back to the client root.
-pub fn to_client(host: &Host, path: &OsString) -> OsString {
-    map_arg(host, path, false)
+    map_arg(host, path)
 }
 
 /// Maps a whole argument: a bare path, or a `file:` token with the path inside.
 /// Other schemes (`http://`, `pipe:`, `-vf`) are left alone.
-fn map_arg(host: &Host, arg: &OsString, forward: bool) -> OsString {
+fn map_arg(host: &Host, arg: &OsString) -> OsString {
     let bytes = arg.as_bytes();
     let Some(rest) = bytes.strip_prefix(FILE_PREFIX) else {
-        return rewrite(host, arg, forward);
+        return rewrite(host, arg);
     };
     let rest = OsString::from_vec(rest.to_vec());
     let mut out = OsString::from("file:");
@@ -43,27 +38,22 @@ fn map_arg(host: &Host, arg: &OsString, forward: bool) -> OsString {
     if quoted {
         let inner = OsString::from_vec(rest.as_bytes()[1..rest.as_bytes().len() - 1].to_vec());
         out.push("\"");
-        out.push(rewrite(host, &inner, forward));
+        out.push(rewrite(host, &inner));
         out.push("\"");
     } else {
-        out.push(rewrite(host, &rest, forward));
+        out.push(rewrite(host, &rest));
     }
     out
 }
 
-/// `forward` selects the rule direction: `from` -> `to` for the worker,
-/// `to` -> `from` on the way back.
-fn rewrite(host: &Host, path: &OsString, forward: bool) -> OsString {
+/// Rewrites `from` -> `to` at the longest matching rule.
+fn rewrite(host: &Host, path: &OsString) -> OsString {
     let path = Path::new(path);
     let mut best: Option<(&Path, &Path)> = None;
     let mut best_key = (0usize, 0usize);
 
     for rule in &host.paths {
-        let (from, to) = if forward {
-            (rule.from.as_path(), rule.to.as_path())
-        } else {
-            (rule.to.as_path(), rule.from.as_path())
-        };
+        let (from, to) = (rule.from.as_path(), rule.to.as_path());
         if from.as_os_str().is_empty() || !path.starts_with(from) {
             continue;
         }
@@ -139,20 +129,12 @@ mod tests {
     }
 
     #[test]
-    fn maps_hls_output_back_to_the_client_root() {
+    fn maps_hls_output_to_the_worker_transcode_root() {
         let h = production();
         assert_eq!(
-            to_client(&h, &os("/home/bob/transcode/seg0001.ts")),
-            os("/dev/shm/jellyfin-transcode/seg0001.ts")
+            to_worker(&h, &os("/dev/shm/jellyfin-transcode/seg0001.ts")),
+            os("/home/bob/transcode/seg0001.ts")
         );
-    }
-
-    #[test]
-    fn mapping_is_reversible() {
-        let h = production();
-        let original = os("/home/alice/media/film.mkv");
-        let there = to_worker(&h, &original);
-        assert_eq!(to_client(&h, &there), original);
     }
 
     #[test]
@@ -188,23 +170,10 @@ mod tests {
     }
 
     #[test]
-    fn nested_rules_work_in_both_directions() {
-        let h = host(vec![
-            ("/home/alice", "/home/bob/media"),
-            ("/home/alice/media", "/mnt/media"),
-        ]);
-        assert_eq!(
-            to_client(&h, &os("/mnt/media/film.mkv")),
-            os("/home/alice/media/film.mkv")
-        );
-    }
-
-    #[test]
     fn unmapped_paths_pass_through_unchanged() {
         let h = production();
         for p in ["-c:v", "libx264", "pipe:0", "/etc/passwd", "/home/mallory"] {
             assert_eq!(to_worker(&h, &os(p)), os(p));
-            assert_eq!(to_client(&h, &os(p)), os(p));
         }
     }
 
@@ -212,7 +181,6 @@ mod tests {
     fn an_exact_match_has_no_trailing_slash() {
         let h = production();
         assert_eq!(to_worker(&h, &os("/home/alice")), os("/home/bob/media"));
-        assert_eq!(to_client(&h, &os("/home/bob/media")), os("/home/alice"));
     }
 
     #[test]
@@ -223,10 +191,6 @@ mod tests {
             os("/home/bob/media/media/film.mkv")
         );
         assert_eq!(to_worker(&h, &os("/home/alice/")), os("/home/bob/media"));
-        assert_eq!(
-            to_client(&h, &os("/home/bob/media/media/film.mkv")),
-            os("/home/alice/media/film.mkv")
-        );
     }
 
     #[test]
@@ -235,7 +199,6 @@ mod tests {
         let client = OsString::from_vec(b"/home/alice/f\xff\xfe.mkv".to_vec());
         let worker = to_worker(&h, &client);
         assert_eq!(worker.as_bytes(), b"/home/bob/media/f\xff\xfe.mkv");
-        assert_eq!(to_client(&h, &worker).as_bytes(), client.as_bytes());
     }
 
     #[test]
@@ -291,14 +254,5 @@ mod tests {
         ] {
             assert_eq!(to_worker(&h, &os(arg)), os(arg), "{arg} must not change");
         }
-    }
-
-    #[test]
-    fn the_reverse_direction_maps_a_file_token_too() {
-        let h = production();
-        assert_eq!(
-            to_client(&h, &os("file:/home/bob/media/media/film.mkv")),
-            os("file:/home/alice/media/film.mkv")
-        );
     }
 }

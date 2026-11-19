@@ -20,12 +20,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 fn main() {
-    // The guard must drop before `process::exit`, which skips destructors.
-    #[cfg(feature = "hotpath")]
-    let guard = hotpath::HotpathGuardBuilder::new("rrffmpeg")
-        .functions_limit(12)
-        .build();
-
     let code = match run() {
         Ok(code) => code,
         Err(e) => {
@@ -33,10 +27,6 @@ fn main() {
             127
         }
     };
-
-    #[cfg(feature = "hotpath")]
-    drop(guard);
-
     std::process::exit(code);
 }
 

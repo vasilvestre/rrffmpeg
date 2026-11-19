@@ -206,7 +206,6 @@ impl Default for Config {
 }
 
 impl Config {
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn load() -> Result<Config> {
         let Some(path) = config_path() else {
             return Ok(Config::default());

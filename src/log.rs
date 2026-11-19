@@ -1,7 +1,6 @@
 //! Log levels for the dispatcher.
 //!
-//! `RRFFMPEG_LOG` sets the threshold: `off`, `error`, `warn`, `info` or
-//! `debug`. The default is `warn`, so a production run prints what it printed
+//! `RRFFMPEG_LOG` sets the threshold: `off`, `error`, `warn` or `debug`. The default is `warn`, so a production run prints what it printed
 //! before this module existed. Use `debug` to see the byte count each job
 //! relays on stdout and stderr, which is how you measure the cost of a large
 //! passthrough such as `ffmpeg -encoders`.
@@ -15,7 +14,6 @@ pub enum Level {
     Off,
     Error,
     Warn,
-    Info,
     Debug,
 }
 
@@ -25,7 +23,6 @@ impl Level {
             "off" => Some(Level::Off),
             "error" => Some(Level::Error),
             "warn" | "warning" => Some(Level::Warn),
-            "info" => Some(Level::Info),
             "debug" | "trace" => Some(Level::Debug),
             _ => None,
         }

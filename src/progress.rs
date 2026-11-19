@@ -12,8 +12,7 @@
 //! - a `Stream #0:0 -> #0:0 (copy)` line under `Stream mapping:` says whether
 //!   the stream is copied or re-encoded, which is how a direct stream and a
 //!   transcode are told apart;
-//! - a stats line, rewritten in place with `\r`, gives `fps`, `bitrate` and
-//!   `speed`.
+//! - a stats line, rewritten in place with `\r`, gives `fps` and `speed`.
 //!
 //! A job run with `-loglevel error` or `-nostats` prints neither, so it records
 //! no sample. That is a gap in the data, never a failure.
@@ -157,10 +156,6 @@ impl Tap {
         }
         if let Some(speed) = number_after(line, "speed=") {
             self.stats.speed = Some(speed.max(self.stats.speed.unwrap_or(0.0)));
-        }
-        // The bitrate is a moment, not a running total, so the last one wins.
-        if let Some(kbps) = number_after(line, "bitrate=") {
-            self.stats.kbps = Some(kbps);
         }
     }
 }
@@ -319,7 +314,6 @@ mod tests {
         ]);
         assert_eq!(stats.fps, Some(30.0));
         assert_eq!(stats.speed, Some(1.40));
-        assert_eq!(stats.kbps, Some(1006.2));
     }
 
     #[test]
@@ -331,7 +325,6 @@ mod tests {
         ]);
         assert_eq!(stats.fps, Some(123.0));
         assert_eq!(stats.speed, Some(5.0));
-        assert_eq!(stats.kbps, None);
     }
 
     #[test]

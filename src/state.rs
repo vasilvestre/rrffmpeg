@@ -38,15 +38,12 @@ const SEQ_BLOCK: u64 = 1024;
 const ROTATE_BYTES: u64 = 8 * 1024 * 1024;
 /// Longest a queued event waits before the flusher forces it to disk.
 const SYNC_INTERVAL: Duration = Duration::from_millis(500);
-/// Bound on the wait for a flush ack, so a wedged flusher cannot hang forever.
-const FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The numbers read from the worker's own stderr, all optional: a job run with
 /// `-loglevel error` or `-nostats` prints none of them.
 ///
 /// `src_hdr` is empty for SDR and names the transfer function otherwise, so a
-/// dashboard can count HDR jobs. Widths are pixels, `speed` is times realtime,
-/// `kbps` is the output bitrate.
+/// dashboard can count HDR jobs. Widths are pixels, `speed` is times realtime.
 ///
 /// `fps` and `speed` are the highest running average the job reached, not its
 /// last line: ffmpeg averages them since the start, so a slow start or a stall
@@ -57,8 +54,6 @@ pub struct Stats {
     pub fps: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kbps: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub src_w: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -148,7 +143,6 @@ pub struct Record {
 
 enum Command {
     Record(Record),
-    Flush(Sender<()>),
     Stop,
 }
 
@@ -162,7 +156,6 @@ struct Live {
     /// Running count per host. Maintained alongside `jobs` so selection never
     /// scans the map.
     counts: HashMap<String, usize>,
-    down: HashSet<String>,
     /// Last sequence number assigned by this process.
     seq: u64,
     /// First number of the next block, exclusive of the current one.
@@ -180,7 +173,6 @@ pub struct Journal {
 }
 
 impl Journal {
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn open(dir: &Path) -> Result<Journal> {
         Self::open_inner(dir, SYNC_INTERVAL, ROTATE_BYTES)
     }
@@ -269,7 +261,6 @@ impl Journal {
 
     /// Queue an event. Touches only memory and an unbounded channel: no file
     /// IO, no fsync, and no panic when the flusher has gone away.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn append(&self, event: Event) {
         let record = {
             let mut live = lock(&self.live);
@@ -301,11 +292,6 @@ impl Journal {
         lock(&self.live).counts.get(host).copied().unwrap_or(0)
     }
 
-    pub fn is_down(&self, host: &str) -> bool {
-        self.ensure_replayed();
-        lock(&self.live).down.contains(host)
-    }
-
     pub fn active_jobs(&self) -> Vec<(String, String)> {
         self.ensure_replayed();
         lock(&self.live)
@@ -313,18 +299,6 @@ impl Journal {
             .iter()
             .map(|(job, host)| (job.clone(), host.clone()))
             .collect()
-    }
-
-    /// Block until everything queued so far is written and synced. Never call
-    /// this on the dispatch path.
-    pub fn flush(&self) -> Result<()> {
-        let (ack_tx, ack_rx) = mpsc::channel();
-        self.tx
-            .send(Command::Flush(ack_tx))
-            .map_err(|_| Error::State("journal flusher is gone".into()))?;
-        ack_rx
-            .recv_timeout(FLUSH_TIMEOUT)
-            .map_err(|_| Error::State("journal flush timed out".into()))
     }
 }
 
@@ -362,12 +336,9 @@ fn apply(event: &Event, live: &mut Live) {
                 dec(&mut live.counts, &host);
             }
         }
-        Event::HostDown { host } => {
-            live.down.insert(host.clone());
-        }
-        Event::HostUp { host } => {
-            live.down.remove(host);
-        }
+        // The host verdict lives in the lock directory. These events are for
+        // `rrffmpeg-stats` only.
+        Event::HostDown { .. } | Event::HostUp { .. } => {}
     }
 }
 
@@ -639,8 +610,6 @@ impl Writer {
 fn flusher_loop(mut writer: Writer, rx: Receiver<Command>) {
     let mut batch: Vec<Record> = Vec::new();
     loop {
-        let mut acks: Vec<Sender<()>> = Vec::new();
-        let mut sync_now = false;
         let mut stop = false;
 
         match rx.recv_timeout(writer.sync_interval) {
@@ -650,10 +619,6 @@ fn flusher_loop(mut writer: Writer, rx: Receiver<Command>) {
                 loop {
                     match rx.try_recv() {
                         Ok(Command::Record(record)) => batch.push(record),
-                        Ok(Command::Flush(ack)) => {
-                            acks.push(ack);
-                            sync_now = true;
-                        }
                         Ok(Command::Stop) => {
                             stop = true;
                             break;
@@ -666,28 +631,16 @@ fn flusher_loop(mut writer: Writer, rx: Receiver<Command>) {
                     }
                 }
             }
-            Ok(Command::Flush(ack)) => {
-                acks.push(ack);
-                sync_now = true;
-            }
             Ok(Command::Stop) => stop = true,
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => stop = true,
         }
 
         writer.commit(&mut batch);
-        if stop || sync_now || writer.sync_due() {
+        if stop || writer.sync_due() {
             writer.sync();
-            for ack in acks.drain(..) {
-                let _ = ack.send(());
-            }
         }
         if stop {
-            // Senders may still be waiting if Stop raced a Flush in the
-            // batch drain loop.
-            for ack in acks.drain(..) {
-                let _ = ack.send(());
-            }
             return;
         }
     }
@@ -738,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn counters_are_correct_before_any_flush() {
+    fn counters_are_correct_before_any_sync() {
         let dir = temp_dir("counters");
         let journal = Journal::open(&dir).unwrap();
         journal.append(started("a", "worker"));
@@ -763,8 +716,7 @@ mod tests {
                 ("c".to_string(), "client".to_string()),
             ]
         );
-        // Nothing forced the flusher, yet the counters are already right.
-        assert!(!journal.is_down("worker"));
+        // Nothing reached the disk yet, and the counters are already right.
     }
 
     #[test]
@@ -774,14 +726,10 @@ mod tests {
             let journal = Journal::open(&dir).unwrap();
             journal.append(started("a", "worker"));
             journal.append(started("b", "worker"));
-            journal.append(Event::HostDown {
-                host: "worker".into(),
-            });
-            journal.flush().unwrap();
         }
+        // Dropping the handle flushes it, so the reopen sees every record.
         let journal = Journal::open(&dir).unwrap();
         assert_eq!(journal.active_on("worker"), 2);
-        assert!(journal.is_down("worker"));
         assert_eq!(journal.active_jobs().len(), 2);
     }
 
@@ -791,7 +739,6 @@ mod tests {
         {
             let journal = Journal::open(&dir).unwrap();
             journal.append(started("orphan", "worker"));
-            journal.flush().unwrap();
         }
         // SIGKILL skipped the Finished event: the row survives the restart.
         let journal = Journal::open(&dir).unwrap();
@@ -800,7 +747,6 @@ mod tests {
         journal.append(Event::Reaped {
             job: "orphan".into(),
         });
-        journal.flush().unwrap();
         assert_eq!(journal.active_on("worker"), 0);
 
         drop(journal);
@@ -809,28 +755,27 @@ mod tests {
         assert!(journal.active_jobs().is_empty());
     }
 
+    /// `rrffmpeg-stats` counts host events, so they must survive the round
+    /// trip through the journal even though the dispatcher keeps its own
+    /// verdict in the lock directory.
     #[test]
-    fn host_down_and_up_round_trip() {
+    fn host_events_survive_replay() {
         let dir = temp_dir("hosts");
         {
             let journal = Journal::open(&dir).unwrap();
             journal.append(Event::HostDown {
                 host: "worker".into(),
             });
-            journal.flush().unwrap();
+            journal.append(Event::HostUp {
+                host: "worker".into(),
+            });
         }
-        let journal = Journal::open(&dir).unwrap();
-        assert!(journal.is_down("worker"));
-
-        journal.append(Event::HostUp {
-            host: "worker".into(),
-        });
-        journal.flush().unwrap();
-        assert!(!journal.is_down("worker"));
-
-        drop(journal);
-        let journal = Journal::open(&dir).unwrap();
-        assert!(!journal.is_down("worker"));
+        let events: Vec<Event> = records(&dir.join(JOURNAL_NAME))
+            .into_iter()
+            .map(|r| r.ev)
+            .collect();
+        assert!(matches!(events[0], Event::HostDown { .. }));
+        assert!(matches!(events[1], Event::HostUp { .. }));
     }
 
     #[test]
@@ -840,15 +785,13 @@ mod tests {
         for i in 0..20 {
             journal.append(started(&format!("job{i}"), "worker"));
         }
-        journal.flush().unwrap();
-
-        assert!(dir.join("journal.1").exists(), "expected a rotated file");
-        assert!(dir.join("journal").exists(), "expected a fresh active file");
         assert_eq!(journal.active_on("worker"), 20);
         assert_eq!(journal.active_jobs().len(), 20);
 
         // Rotated content and state both survive a restart.
         drop(journal);
+        assert!(dir.join("journal.1").exists(), "expected a rotated file");
+        assert!(dir.join("journal").exists(), "expected a fresh active file");
         let journal = Journal::open(&dir).unwrap();
         assert_eq!(journal.active_on("worker"), 20);
     }
@@ -876,7 +819,6 @@ mod tests {
 
         // Unknown event kinds are skipped the same way.
         journal.append(started("c", "worker"));
-        journal.flush().unwrap();
         assert_eq!(journal.active_on("worker"), 2);
     }
 
@@ -908,10 +850,10 @@ mod tests {
         for handle in handles {
             handle.join().unwrap();
         }
-        journal.flush().unwrap();
 
         assert_eq!(journal.active_on("worker"), 4000);
         assert_eq!(journal.active_jobs().len(), 4000);
+        drop(journal);
 
         let lines = records(&dir.join(JOURNAL_NAME));
         assert_eq!(lines.len(), 4000);
@@ -939,7 +881,6 @@ mod tests {
                 for i in 0..PER_WRITER {
                     journal.append(started(&format!("job-{t}-{i}"), "worker"));
                 }
-                journal.flush().unwrap();
             }));
         }
         for handle in handles {
@@ -965,24 +906,24 @@ mod tests {
     #[test]
     fn replay_does_not_move_the_writer_past_its_block() {
         let dir = temp_dir("replay-block");
-        let first = Journal::open(&dir).unwrap();
-        let second = Journal::open(&dir).unwrap();
-        let third = Journal::open(&dir).unwrap();
+        {
+            let first = Journal::open(&dir).unwrap();
+            let second = Journal::open(&dir).unwrap();
+            let third = Journal::open(&dir).unwrap();
 
-        // Write past the second and third blocks, so their replay would land on
-        // the same high number without a per-process block.
-        for i in 0..SEQ_BLOCK * 2 + 2 {
-            first.append(started(&format!("a-{i}"), "worker"));
+            // Write past the second and third blocks, so their replay would
+            // land on the same high number without a per-process block.
+            for i in 0..SEQ_BLOCK * 2 + 2 {
+                first.append(started(&format!("a-{i}"), "worker"));
+            }
+
+            // Both replay the same high tail, as the janitor does in every
+            // process.
+            let _ = second.active_on("worker");
+            let _ = third.active_on("worker");
+            second.append(started("b", "worker"));
+            third.append(started("c", "worker"));
         }
-        first.flush().unwrap();
-
-        // Both replay the same high tail, as the janitor does in every process.
-        let _ = second.active_on("worker");
-        let _ = third.active_on("worker");
-        second.append(started("b", "worker"));
-        third.append(started("c", "worker"));
-        second.flush().unwrap();
-        third.flush().unwrap();
 
         let lines = records(&dir.join(JOURNAL_NAME));
         let total = lines.len();
@@ -1007,7 +948,7 @@ mod tests {
         for i in 0..n {
             journal.append(started(&format!("j{i}"), "worker"));
         }
-        journal.flush().unwrap();
+        drop(journal);
 
         let lines = records(&dir.join(JOURNAL_NAME));
         assert_eq!(lines.len(), n);

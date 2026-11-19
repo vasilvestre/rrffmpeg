@@ -75,7 +75,6 @@ impl Scheduler {
 
     /// Reserve a slot on the eligible host with the lowest running/concurrency
     /// ratio, first in config order on ties.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn acquire(&self, job: &Job) -> Option<Lease> {
         // Someone already waits for a slot this job could use, so queue up
         // behind them. A caller that skips this takes the slot a waiter slept

@@ -475,7 +475,6 @@ mod tests {
         let stats = crate::state::Stats {
             fps: Some(23.98),
             speed: Some(1.24),
-            kbps: Some(1116.0),
             src_w: Some(1920),
             src_h: Some(1080),
             src_codec: Some("hevc".into()),

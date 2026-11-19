@@ -108,7 +108,6 @@ impl Drop for Janitor {
 }
 
 /// One pass: reap orphans, then retest hosts.
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn cycle(
     scheduler: &Scheduler,
     journal: &Journal,

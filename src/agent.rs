@@ -382,7 +382,6 @@ pub struct Agent {
 
 impl Agent {
     /// `cert` is the PEM of the daemon certificate, the only trust anchor.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn load(token: String, cert: &Path) -> Result<Agent> {
         Ok(Agent {
             token,
@@ -394,7 +393,6 @@ impl Agent {
     /// Connect and shake hands. The socket has no read timeout after this,
     /// except where the caller sets one: a transcode can stay silent for
     /// minutes while ffmpeg works.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn open(&self, host: &Host, timeout: Option<Duration>) -> Result<Stream> {
         let name = host
             .agent_addr
@@ -496,7 +494,6 @@ impl Agent {
 
     /// Run one job with output going to the two sinks. `run` passes this
     /// process's own fds; the tests pass buffers.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn exec(
         &self,
         host: &Host,

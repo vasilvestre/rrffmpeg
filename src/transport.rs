@@ -28,8 +28,8 @@ pub trait Transport: Send + Sync {
 pub struct Ssh {
     pub ssh_bin: PathBuf,
     /// Remote directory for per-job pid files.
-    pub pid_dir: String,
-    pub timeout: Duration,
+    pid_dir: String,
+    timeout: Duration,
     /// Keep one ssh connection per host open between jobs, so a job pays a
     /// channel open instead of a full handshake. `None` spawns a fresh ssh.
     pub persist: Option<Persist>,
@@ -326,7 +326,6 @@ impl Router {
 }
 
 impl Transport for Router {
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn run(&self, host: &Host, job: &Job, stderr_as_stdout: bool) -> Result<i32> {
         match host.agent_addr {
             Some(_) => self.agent(host)?.run(host, job, stderr_as_stdout),

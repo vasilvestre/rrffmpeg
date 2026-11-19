@@ -135,6 +135,7 @@ impl Queue {
     }
 
     /// True when no other ticket ranks before this one.
+    #[cfg(test)]
     pub fn ahead(&self, lane: &Lane) -> bool {
         self.before_me(lane) == 0
     }
