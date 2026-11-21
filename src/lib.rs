@@ -55,7 +55,7 @@ impl Class {
     ///
     /// Everything else is Heavy: a video encode, a remux, a tonemap transcode.
     pub fn of(program: Program, args: &[OsString]) -> Class {
-        if program == Program::Ffprobe {
+        if program == Program::Ffprobe || lists_and_exits(args) {
             return Class::Light;
         }
         let stills = value_of(args, "-f") == Some("image2");
@@ -74,6 +74,20 @@ fn value_of<'a>(args: &'a [OsString], flag: &str) -> Option<&'a str> {
     let wanted = OsStr::new(flag);
     let at = args.iter().position(|arg| arg.as_os_str() == wanted)?;
     args.get(at + 1)?.to_str()
+}
+
+/// The flags that make ffmpeg print a listing and exit.
+const PROBE_LISTS: [&str; 5] = ["-version", "-encoders", "-hwaccels", "-filters", "-h"];
+
+/// A startup probe: ffmpeg prints a list and exits, in milliseconds.
+///
+/// Jellyfin asks for `-version`, `-encoders` and `-hwaccels` when it starts.
+/// They take no input, so they must never queue behind a transcode: with an
+/// auto-sized cap of 1 that wait is the full `queue_wait_secs`. The `-i`
+/// guard keeps a real job that happens to mention `-h` elsewhere out of the
+/// rule (ADR 0032).
+fn lists_and_exits(args: &[OsString]) -> bool {
+    !has_flag(args, "-i") && PROBE_LISTS.iter().any(|flag| has_flag(args, flag))
 }
 
 /// One dispatched transcode.
@@ -161,7 +175,7 @@ impl Kind {
     ///   `remux`.
     /// - everything else encodes video: `transcode`.
     pub fn of(program: Program, args: &[OsString]) -> Kind {
-        if program == Program::Ffprobe {
+        if program == Program::Ffprobe || lists_and_exits(args) {
             return Kind::Probe;
         }
         let format = value_of(args, "-f");
@@ -295,6 +309,42 @@ mod tests {
 
     /// The extraction Jellyfin runs for trickplay: key frames only, MJPEG, a
     /// numbered series. It is the reason the split exists.
+    /// Jellyfin probes with `-version` and `-encoders` when it starts: a
+    /// listing, a few milliseconds, no input. They must never wait for a
+    /// transcode, and they are not transcodes in the stats either.
+    #[test]
+    fn a_startup_probe_is_light_and_kind_probe() {
+        for argv in [
+            vec!["-version"],
+            vec!["-encoders"],
+            vec!["-hwaccels"],
+            vec!["-filters"],
+            vec!["-h", "encoder=h264_vaapi"],
+        ] {
+            let job = Job {
+                id: "j".into(),
+                program: Program::Ffmpeg,
+                args: argv.iter().map(std::ffi::OsString::from).collect(),
+                priority: 0,
+                capabilities: Vec::new(),
+            };
+            assert_eq!(job.class(), Class::Light, "{argv:?}");
+            assert_eq!(job.kind(), Kind::Probe, "{argv:?}");
+        }
+        // A job that carries an input is never a listing, whatever else it says.
+        let with_input = Job {
+            id: "j".into(),
+            program: Program::Ffmpeg,
+            args: ["-h", "1", "-i", "file:/m/x.mkv"]
+                .iter()
+                .map(std::ffi::OsString::from)
+                .collect(),
+            priority: 0,
+            capabilities: Vec::new(),
+        };
+        assert_eq!(with_input.class(), Class::Heavy);
+    }
+
     #[test]
     fn a_trickplay_scan_is_light() {
         assert_eq!(
