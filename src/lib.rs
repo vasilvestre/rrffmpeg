@@ -76,18 +76,12 @@ fn value_of<'a>(args: &'a [OsString], flag: &str) -> Option<&'a str> {
     args.get(at + 1)?.to_str()
 }
 
-/// The flags that make ffmpeg print a listing and exit.
-const PROBE_LISTS: [&str; 5] = ["-version", "-encoders", "-hwaccels", "-filters", "-h"];
-
-/// A startup probe: ffmpeg prints a list and exits, in milliseconds.
-///
-/// Jellyfin asks for `-version`, `-encoders` and `-hwaccels` when it starts.
-/// They take no input, so they must never queue behind a transcode: with an
-/// auto-sized cap of 1 that wait is the full `queue_wait_secs`. The `-i`
-/// guard keeps a real job that happens to mention `-h` elsewhere out of the
-/// rule (ADR 0032).
+/// A startup probe: ffmpeg prints a listing and exits, so it must never queue
+/// behind a transcode, where an auto cap of 1 costs the full `queue_wait_secs`.
+/// The `-i` guard keeps a real job that mentions `-h` out of the rule.
 fn lists_and_exits(args: &[OsString]) -> bool {
-    !has_flag(args, "-i") && PROBE_LISTS.iter().any(|flag| has_flag(args, flag))
+    let lists = ["-version", "-encoders", "-hwaccels", "-filters", "-h"];
+    !has_flag(args, "-i") && lists.iter().any(|flag| has_flag(args, flag))
 }
 
 /// One dispatched transcode.
@@ -315,34 +309,18 @@ mod tests {
     #[test]
     fn a_startup_probe_is_light_and_kind_probe() {
         for argv in [
-            vec!["-version"],
-            vec!["-encoders"],
-            vec!["-hwaccels"],
-            vec!["-filters"],
-            vec!["-h", "encoder=h264_vaapi"],
+            &["-version"][..],
+            &["-encoders"],
+            &["-hwaccels"],
+            &["-filters"],
+            &["-h", "encoder=h264_vaapi"],
         ] {
-            let job = Job {
-                id: "j".into(),
-                program: Program::Ffmpeg,
-                args: argv.iter().map(std::ffi::OsString::from).collect(),
-                priority: 0,
-                capabilities: Vec::new(),
-            };
-            assert_eq!(job.class(), Class::Light, "{argv:?}");
-            assert_eq!(job.kind(), Kind::Probe, "{argv:?}");
+            assert_eq!(class(argv), Class::Light, "{argv:?}");
+            let args: Vec<OsString> = argv.iter().map(OsString::from).collect();
+            assert_eq!(Kind::of(Program::Ffmpeg, &args), Kind::Probe, "{argv:?}");
         }
         // A job that carries an input is never a listing, whatever else it says.
-        let with_input = Job {
-            id: "j".into(),
-            program: Program::Ffmpeg,
-            args: ["-h", "1", "-i", "file:/m/x.mkv"]
-                .iter()
-                .map(std::ffi::OsString::from)
-                .collect(),
-            priority: 0,
-            capabilities: Vec::new(),
-        };
-        assert_eq!(with_input.class(), Class::Heavy);
+        assert_eq!(class(&["-h", "1", "-i", "file:/m/x.mkv"]), Class::Heavy);
     }
 
     #[test]

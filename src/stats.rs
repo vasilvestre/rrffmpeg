@@ -312,21 +312,16 @@ impl Summary {
         // tail no longer holds the sample behind it: a cold start writes one
         // with `n 0`, and a host that never measured anything used to show no
         // `size` row at all.
-        let measured: std::collections::HashSet<(String, String)> = self
-            .sizes
-            .iter()
-            .flat_map(|(host, sizes)| {
-                sizes.iter().map(move |size| {
-                    let label = size
-                        .key
-                        .as_ref()
-                        .map_or_else(|| "heavy".to_string(), |key| key.label());
-                    (host.clone(), label)
-                })
-            })
-            .collect();
         for ((host, class), (cap, samples, p05)) in &self.recorded {
-            if measured.contains(&(host.clone(), class.clone())) {
+            let measured = self.sizes.get(host).is_some_and(|sizes| {
+                sizes.iter().any(|size| {
+                    size.key
+                        .as_ref()
+                        .map_or_else(|| "heavy".to_string(), |key| key.label())
+                        == *class
+                })
+            });
+            if measured {
                 continue;
             }
             out.push_str(&format!(

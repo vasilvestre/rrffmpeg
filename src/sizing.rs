@@ -109,10 +109,7 @@ impl Size {
             cap: 1,
             samples: 0,
             p05: None,
-            // 0, not 1: nothing recorded a cap before this one, so the caller
-            // writes a `Sized` line with `samples 0`. A cold start that stayed
-            // silent was invisible in the journal, which is the case an
-            // operator most needs to see.
+            // 0, so the caller records the cold start with `samples 0`.
             previous: 0,
         }
     }
