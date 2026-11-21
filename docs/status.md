@@ -1,6 +1,6 @@
 # Status
 
-Last updated 2026-11-21, version 0.15.0.
+Last updated 2026-11-21, version 0.16.0.
 
 ## What works (v1)
 

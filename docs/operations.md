@@ -51,6 +51,150 @@ anything on the worker beyond the process lifetime. For the week-long test, run
 it from cron and keep the output, or point a log collector at the journal: it is
 one JSON object per line, and `--json` gives the same figures in one object.
 
+## Ship the numbers to Grafana
+
+The journal is one JSON object per line already, so no Rust code stands between
+it and Grafana. Two paths, two questions.
+
+### History: counters and histograms through Alloy
+
+Alloy tails the journal, lifts the event fields into labels, and turns the
+lines into a counter and two histograms. Counters only go up, so `rate()` and
+`histogram_quantile()` work over any window, which the snapshot below cannot
+do.
+
+```hcl
+loki.source.file "journal" {
+  targets = [
+    { __path__ = "/home/alice/.local/state/rrffmpeg/journal" },
+    { __path__ = "/home/alice/.local/state/rrffmpeg/journal.*" },
+  ]
+  forward_to = [loki.process.journal.receiver]
+}
+
+loki.process "journal" {
+  stage.json {
+    expressions = {
+      event    = "ev.kind",
+      host     = "ev.host",
+      code     = "ev.code",
+      dispatch = "ev.elapsed_us",
+      duration = "ev.dur_us",
+    }
+    // Keeps journal.seq, which is a bare number, out of Loki.
+    drop_malformed = true
+  }
+
+  stage.labels {
+    values = { host = "", event = "" }
+  }
+
+  stage.match {
+    selector = "{event=\"started\"}"
+    stage.metrics {
+      metric.counter {
+        name        = "rrffmpeg_jobs_total"
+        description = "Jobs the dispatcher started."
+        match_all   = true
+        action      = "inc"
+      }
+      metric.histogram {
+        name        = "rrffmpeg_dispatch_us"
+        description = "Microseconds from process start to the worker."
+        source      = "dispatch"
+        buckets     = [1000, 5000, 10000, 25000, 50000, 100000, 500000]
+      }
+    }
+  }
+
+  stage.match {
+    selector = "{event=\"finished\"}"
+    stage.metrics {
+      metric.counter {
+        name        = "rrffmpeg_jobs_ok_total"
+        description = "Jobs that ended zero."
+        source      = "code"
+        value       = "0"
+        action      = "inc"
+      }
+      metric.histogram {
+        name        = "rrffmpeg_job_duration_us"
+        description = "Microseconds the worker spent on a job."
+        source      = "duration"
+        buckets     = [100000, 500000, 1000000, 5000000, 30000000, 120000000]
+      }
+    }
+  }
+
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint { url = "http://127.0.0.1:3100/loki/api/v1/push" }
+}
+```
+
+Alloy serves those metrics on its own `/metrics`, with the
+`loki_process_custom_` prefix, and they carry the `host` and `event` labels, so
+a per-host panel works:
+
+```promql
+histogram_quantile(0.95,
+  sum by (le) (rate(loki_process_custom_rrffmpeg_dispatch_us_bucket[5m])))
+```
+
+Four things to know. Set `tail_from_end = false` on the first run, or Alloy
+starts after the last line and the existing journal never reaches Loki, and
+nothing counts it. The counters reset when Alloy reloads its config; `rate()`
+handles that. Failed jobs are `rrffmpeg_jobs_total - rrffmpeg_jobs_ok_total`,
+because a counter can only match one exact value and `code` is a number. The
+block label form `metric.counter "name" { }` does not parse; use
+`metric.counter { name = "..." }`. This config was run against Alloy v1.11.2
+on a sample journal, and those five series came out.
+
+### Now: snapshot gauges from the textfile
+
+`--prometheus` prints what only the whole journal can tell: percentiles over
+every job, the open count, and the cap each host sized itself to, which is not
+a log line. A process that exits cannot be scraped, so a timer writes the file
+where Alloy's unix exporter reads it:
+
+```bash
+rrffmpeg-stats --prometheus > /var/lib/alloy/textfile/rrffmpeg.prom
+```
+
+```hcl
+prometheus.exporter.unix "local" {
+  textfile {
+    directory = "/var/lib/alloy/textfile"
+  }
+}
+```
+
+The file is rewritten whole on each run, so a systemd timer is enough. The
+series:
+
+- `rrffmpeg_dispatch_seconds` and `rrffmpeg_job_duration_seconds`, each with a
+  `quantile` label (`0.5`, `0.95`, `0.99`, `1`).
+- `rrffmpeg_speed_ratio` and `rrffmpeg_fps`, same quantile label.
+- `rrffmpeg_open_jobs`, `rrffmpeg_jobs_finished`, `rrffmpeg_reaped_jobs`.
+- `rrffmpeg_host_jobs` and `rrffmpeg_host_failures`, per host.
+- `rrffmpeg_jobs{kind}`, `rrffmpeg_classes{class}`, `rrffmpeg_exit_codes{code}`.
+- `rrffmpeg_slots{host,class}`: the cap the next dispatch uses.
+- `rrffmpeg_light_wait_over_1s` and `rrffmpeg_orphan_events{kind}`, the two
+  counters that must stay at zero.
+
+A figure with no sample is absent, not zero, so a dashboard shows a gap
+instead of a measured zero. The percentiles cover the whole journal, so they
+drift slowly and jump at rotation: use them for the current state, and the
+Alloy counters for history.
+
+### ELK
+
+Filebeat reads the same lines: set `ndjson` on the input and the `ev.kind`
+field becomes searchable. `--json` still prints one object with the summary
+figures for anything that wants a single document. Neither path is tested here.
+
 The benchmark behind the transport numbers, with its method and raw runs, is in
 `latency.md`. The side-by-side against rffmpeg is in `compare-rffmpeg.md`.
 
@@ -76,4 +220,5 @@ Keep a record for the week-long test:
 
 ```bash
 rrffmpeg-stats --json >> ~/rrffmpeg-week.jsonl
+rrffmpeg-stats --prometheus > /var/lib/alloy/textfile/rrffmpeg.prom
 ```

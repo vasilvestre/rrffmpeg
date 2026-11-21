@@ -485,6 +485,169 @@ impl Summary {
         value.to_string()
     }
 
+    /// Prometheus text exposition, 0.0.4. There is no daemon to scrape, so a
+    /// collector reads this from a file: Alloy's unix exporter, textfile
+    /// collector. Every duration is in seconds, as Prometheus expects.
+    pub fn prometheus(&self) -> String {
+        let mut out = String::new();
+        gauge(
+            &mut out,
+            "rrffmpeg_journal_records",
+            "Journal lines read, rotated files included.",
+            self.records as f64,
+        );
+        gauge(
+            &mut out,
+            "rrffmpeg_jobs_finished",
+            "Jobs with a finished event.",
+            self.duration_us.len() as f64,
+        );
+        gauge(
+            &mut out,
+            "rrffmpeg_open_jobs",
+            "Jobs started with no finished event.",
+            self.open as f64,
+        );
+        gauge(
+            &mut out,
+            "rrffmpeg_reaped_jobs",
+            "Jobs the janitor reaped.",
+            self.reaped as f64,
+        );
+        gauge(
+            &mut out,
+            "rrffmpeg_light_wait_over_1s",
+            "Light jobs that waited over one second to be placed.",
+            self.light_waits().0 as f64,
+        );
+        labeled(
+            &mut out,
+            "rrffmpeg_orphan_events",
+            "Journal events with no matching start, by kind.",
+            &[
+                ("kind=\"finish\"".to_string(), self.orphan_finish as f64),
+                ("kind=\"reaped\"".to_string(), self.orphan_reaped as f64),
+            ],
+        );
+        quantiles(
+            &mut out,
+            "rrffmpeg_dispatch_seconds",
+            "From process start to the job leaving for the worker.",
+            &self.dispatch_us,
+            1_000_000.0,
+        );
+        quantiles(
+            &mut out,
+            "rrffmpeg_job_duration_seconds",
+            "Gap between the started and the finished event.",
+            &self.duration_us,
+            1_000_000.0,
+        );
+        quantiles(
+            &mut out,
+            "rrffmpeg_speed_ratio",
+            "ffmpeg speed as a multiple of realtime.",
+            &self.speed,
+            1_000.0,
+        );
+        quantiles(
+            &mut out,
+            "rrffmpeg_fps",
+            "Frames per second ffmpeg reported.",
+            &self.fps,
+            10.0,
+        );
+        labeled(
+            &mut out,
+            "rrffmpeg_host_jobs",
+            "Jobs placed on a host.",
+            &self
+                .hosts
+                .iter()
+                .map(|(host, tally)| (label("host", host), tally.jobs as f64))
+                .collect::<Vec<_>>(),
+        );
+        labeled(
+            &mut out,
+            "rrffmpeg_host_failures",
+            "Jobs that ended non-zero on a host.",
+            &self
+                .hosts
+                .iter()
+                .map(|(host, tally)| (label("host", host), tally.failed as f64))
+                .collect::<Vec<_>>(),
+        );
+        labeled(
+            &mut out,
+            "rrffmpeg_jobs",
+            "Jobs by kind.",
+            &self
+                .counts(kind_of)
+                .into_iter()
+                .map(|(kind, n)| (label("kind", &kind), n as f64))
+                .collect::<Vec<_>>(),
+        );
+        labeled(
+            &mut out,
+            "rrffmpeg_classes",
+            "Jobs by placement class.",
+            &self
+                .classes
+                .iter()
+                .map(|(class, n)| (label("class", class), *n as f64))
+                .collect::<Vec<_>>(),
+        );
+        labeled(
+            &mut out,
+            "rrffmpeg_exit_codes",
+            "Finished jobs by exit code.",
+            &self
+                .codes
+                .iter()
+                .map(|(code, n)| (label("code", &code.to_string()), *n as f64))
+                .collect::<Vec<_>>(),
+        );
+        let mut slots: Vec<(String, f64)> = Vec::new();
+        for (host, sizes) in &self.sizes {
+            for size in sizes {
+                slots.push((
+                    format!(
+                        "{},{}",
+                        label("host", host),
+                        label("class", &size_label(size))
+                    ),
+                    size.cap as f64,
+                ));
+            }
+        }
+        // A recorded cap with no live sample is the cold start: the number the
+        // next dispatch uses, so a dashboard sees it instead of a gap.
+        for ((host, class), (cap, _, _)) in &self.recorded {
+            if self.sizes.contains_key(host) {
+                continue;
+            }
+            slots.push((
+                format!("{},{}", label("host", host), label("class", class)),
+                *cap as f64,
+            ));
+        }
+        labeled(
+            &mut out,
+            "rrffmpeg_slots",
+            "Slots a host sized itself to, by content class.",
+            &slots,
+        );
+        out
+    }
+
+    fn counts(&self, key: fn(&Job) -> &str) -> BTreeMap<String, usize> {
+        let mut counts = BTreeMap::new();
+        for job in &self.jobs {
+            *counts.entry(key(job).to_string()).or_insert(0) += 1;
+        }
+        counts
+    }
+
     /// One row per host and class: the cap the next dispatch will use, the
     /// sample count and the p05 behind it.
     fn sizes_json(&self) -> serde_json::Value {
@@ -665,6 +828,54 @@ fn stats(samples: &[u64]) -> serde_json::Value {
     })
 }
 
+/// The class of a size row: `heavy` when the host has no sample yet.
+fn size_label(size: &crate::sizing::Size) -> String {
+    size.key
+        .as_ref()
+        .map_or_else(|| "heavy".to_string(), |key| key.label())
+}
+
+/// `name="value"`, escaped the way the exposition format requires. Labels are
+/// host names and codec classes here, so this only guards against a quote.
+fn label(name: &str, value: &str) -> String {
+    let value = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n");
+    format!("{name}=\"{value}\"")
+}
+
+fn gauge(out: &mut String, name: &str, help: &str, value: f64) {
+    out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} gauge\n"));
+    out.push_str(&format!("{name} {value}\n"));
+}
+
+/// Nothing is written for an empty label set: a HELP with no sample reads as
+/// a broken scrape, and a zero would read as a measurement of no time.
+fn labeled(out: &mut String, name: &str, help: &str, rows: &[(String, f64)]) {
+    if rows.is_empty() {
+        return;
+    }
+    out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} gauge\n"));
+    for (labels, value) in rows {
+        out.push_str(&format!("{name}{{{labels}}} {value}\n"));
+    }
+}
+
+/// p50, p95, p99 and max from a sorted slice, divided to the base unit.
+fn quantiles(out: &mut String, name: &str, help: &str, sorted: &[u64], divisor: f64) {
+    if sorted.is_empty() {
+        return;
+    }
+    out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} gauge\n"));
+    for (fraction, rank) in [("0.5", 0.50), ("0.95", 0.95), ("0.99", 0.99), ("1", 1.0)] {
+        out.push_str(&format!(
+            "{name}{{quantile=\"{fraction}\"}} {}\n",
+            percentile(sorted, rank) as f64 / divisor
+        ));
+    }
+}
+
 /// Microseconds in the unit a reader thinks in. Two digits are enough at every
 /// scale: nobody needs 12.4 s shown to the microsecond.
 pub fn human(us: u64) -> String {
@@ -680,10 +891,12 @@ pub fn human(us: u64) -> String {
 pub fn main(args: &[String]) -> Result<i32> {
     let mut dir = None;
     let mut json = false;
+    let mut prometheus = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--json" => json = true,
+            "--prometheus" => prometheus = true,
             "--dir" => {
                 i += 1;
                 let Some(value) = args.get(i) else {
@@ -692,7 +905,7 @@ pub fn main(args: &[String]) -> Result<i32> {
                 dir = Some(std::path::PathBuf::from(value));
             }
             "-h" | "--help" => {
-                eprintln!("usage: rrffmpeg-stats [--dir STATE_DIR] [--json]");
+                eprintln!("usage: rrffmpeg-stats [--dir STATE_DIR] [--json|--prometheus]");
                 return Ok(0);
             }
             other => {
@@ -706,7 +919,9 @@ pub fn main(args: &[String]) -> Result<i32> {
         None => crate::Config::load()?.state_dir,
     };
     let summary = Summary::of(&dir)?;
-    if json {
+    if prometheus {
+        print!("{}", summary.prometheus());
+    } else if json {
         println!("{}", summary.json());
     } else {
         print!("{}", summary.report());
@@ -775,6 +990,52 @@ mod tests {
         assert!(report.contains("dispatch"), "{report}");
         assert!(report.contains("host worker"), "{report}");
         assert!(report.contains("class     heavy 2"), "{report}");
+    }
+
+    /// One scrape target per client: a collector reads this text, so the
+    /// figures must be in base units and a missing sample must not print a
+    /// zero that reads as a measurement.
+    #[test]
+    fn prometheus_exposition_carries_seconds_and_labels() {
+        let records = vec![
+            record(1, 1_000, started("a", "worker", 500_000)),
+            record(2, 1_300_000, finished("a", 0)),
+        ];
+        let text = Summary::from_records("journal".into(), &records).prometheus();
+        assert!(
+            text.contains("# TYPE rrffmpeg_dispatch_seconds gauge"),
+            "{text}"
+        );
+        assert!(
+            text.contains("rrffmpeg_dispatch_seconds{quantile=\"0.5\"} 0.5"),
+            "{text}"
+        );
+        assert!(
+            text.contains("rrffmpeg_job_duration_seconds{quantile=\"0.5\"} 1.299"),
+            "{text}"
+        );
+        assert!(
+            text.contains("rrffmpeg_host_jobs{host=\"worker\"} 1"),
+            "{text}"
+        );
+        assert!(text.contains("rrffmpeg_exit_codes{code=\"0\"} 1"), "{text}");
+        assert!(
+            text.contains("rrffmpeg_jobs{kind=\"transcode\"} 1"),
+            "{text}"
+        );
+        // No speed in the journal, so no speed series: a zero would read as a
+        // measured 0x transcode.
+        assert!(!text.contains("rrffmpeg_speed_ratio"), "{text}");
+    }
+
+    #[test]
+    fn prometheus_escapes_a_label_value() {
+        let records = vec![record(1, 0, started("a", "wo\"rker", 1))];
+        let text = Summary::from_records("journal".into(), &records).prometheus();
+        assert!(
+            text.contains("rrffmpeg_host_jobs{host=\"wo\\\"rker\"} 1"),
+            "{text}"
+        );
     }
 
     #[test]

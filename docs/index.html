@@ -148,8 +148,9 @@ of tmpfs, the dispatch rises by 39 ms.</p>
   the source was HDR, and whether each stream was copied or re-encoded, so a
   direct stream and a transcode read apart. The fps and speed are the highest
   average the job reached, so a slow start does not pass for a slow machine.
-  <code>rrffmpeg-stats</code> prints them as percentiles and tables, and Alloy
-  ships the same lines to Loki.</li>
+  <code>rrffmpeg-stats</code> prints them as percentiles and tables,
+  <code>--prometheus</code> writes them for a scrape, and Alloy tails the
+  journal into Loki and derives counters from the same lines.</li>
   <li><b>In-process janitor.</b> Retests unhealthy hosts, reaps orphans,
   requeues. No cron watchdog.</li>
   <li><b>Cross-process concurrency cap, sized from the journal.</b> One lock
@@ -220,7 +221,8 @@ the client trusts exactly one certificate: the daemon's own.</p>
 <p>It also carries <code>rrffmpeg-stats</code>. Install it on the client and it
 reads the journal back: percentiles of dispatch cost and job duration, per
 host, exit codes, open jobs, orphan events. <code>--json</code> prints one
-object for a log collector.</p>
+object for a log collector, and <code>--prometheus</code> prints Prometheus
+text for a textfile scrape.</p>
 
 <pre><code>rrffmpeg-stats --dir ~/.local/state/rrffmpeg</code></pre>
 
