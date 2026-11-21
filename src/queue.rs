@@ -12,6 +12,7 @@
 //! both wait get starts in the ratio of their weights; a client alone still
 //! takes every slot, because nothing outranks it.
 
+use crate::Class;
 use crate::locks::hostkey;
 use std::collections::HashMap;
 use std::fs::{File, FileTimes, OpenOptions};
@@ -62,9 +63,11 @@ impl Queue {
         }
     }
 
-    /// Publish a ticket and return the handle that keeps it alive.
-    pub fn join(&self, host: &str, class: i32, client: &str, weight: u32) -> Lane {
-        let dir = self.dir(host);
+    /// Publish a ticket and return the handle that keeps it alive. Each pool
+    /// has its own lane directory, so a Light job never ranks against a Heavy
+    /// one.
+    pub fn join(&self, host: &str, pool: Class, class: i32, client: &str, weight: u32) -> Lane {
+        let dir = self.dir(host, pool);
         let seq = now_nanos();
         let path = dir.join(format!("{seq}-{}.want", std::process::id()));
         let mut lane = Lane {
@@ -120,13 +123,13 @@ impl Queue {
         }
     }
 
-    /// True when a live job waits in this host's lane.
+    /// True when a live job waits in this host's lane for `pool`.
     ///
     /// A job that can take a slot without queueing still has to ask, or every
     /// newcomer jumps the queue a waiter is standing in, and the waiter sleeps
     /// through slot after slot.
-    pub fn has_waiters(&self, host: &str) -> bool {
-        let Ok(entries) = std::fs::read_dir(self.dir(host)) else {
+    pub fn has_waiters(&self, host: &str, pool: Class) -> bool {
+        let Ok(entries) = std::fs::read_dir(self.dir(host, pool)) else {
             return false;
         };
         entries.flatten().any(|entry| {
@@ -184,10 +187,10 @@ impl Queue {
         before
     }
 
-    /// Count one start for `client` on `host`. Called only when the job had to
-    /// queue, so a client that is alone never builds a lead.
-    pub fn charge(&self, host: &str, client: &str) {
-        let dir = self.dir(host);
+    /// Count one start for `client` on `host` in `pool`'s lane. Called only
+    /// when the job had to queue, so a client that is alone never builds a lead.
+    pub fn charge(&self, host: &str, pool: Class, client: &str) {
+        let dir = self.dir(host, pool);
         if std::fs::create_dir_all(&dir).is_err() {
             return;
         }
@@ -237,8 +240,12 @@ impl Queue {
         out
     }
 
-    fn dir(&self, host: &str) -> PathBuf {
-        self.coord.join(hostkey(host)).join("queue")
+    fn dir(&self, host: &str, pool: Class) -> PathBuf {
+        let lane = match pool {
+            Class::Heavy => "queue",
+            Class::Light => "light",
+        };
+        self.coord.join(hostkey(host)).join(lane)
     }
 }
 
@@ -332,11 +339,31 @@ mod tests {
         (dir.clone(), Queue::new(&dir))
     }
 
+    /// Each pool has its own lane, so a Light job never ranks against a Heavy
+    /// one. This is what keeps a probe from queueing behind a transcode.
+    #[test]
+    fn the_light_lane_is_separate_from_the_heavy_one() {
+        let (dir, queue) = scratch("lanes");
+        let transcode = queue.join("w", Class::Heavy, 0, "alice", 100);
+        let probe = queue.join("w", Class::Light, -5, "alice", 100);
+        assert!(queue.ahead(&probe), "the probe is alone in the light lane");
+        assert!(queue.ahead(&transcode), "and the transcode in its own");
+        assert!(queue.has_waiters("w", Class::Light));
+        assert!(queue.has_waiters("w", Class::Heavy));
+        assert_ne!(
+            queue.dir("w", Class::Light),
+            queue.dir("w", Class::Heavy),
+            "the two pools must not share a lane"
+        );
+        drop((transcode, probe));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_probe_goes_before_a_transcode() {
         let (dir, queue) = scratch("class");
-        let transcode = queue.join("w", 0, "alice", 100);
-        let probe = queue.join("w", -5, "alice", 100);
+        let transcode = queue.join("w", Class::Heavy, 0, "alice", 100);
+        let probe = queue.join("w", Class::Heavy, -5, "alice", 100);
         assert!(queue.ahead(&probe), "the probe must rank first");
         assert!(!queue.ahead(&transcode), "the transcode must yield");
         drop(probe);
@@ -347,20 +374,20 @@ mod tests {
     #[test]
     fn the_client_with_fewer_starts_per_weight_goes_first() {
         let (dir, queue) = scratch("weight");
-        queue.charge("w", "alice");
-        queue.charge("w", "alice");
+        queue.charge("w", Class::Heavy, "alice");
+        queue.charge("w", Class::Heavy, "alice");
         // Same weight, zero starts: bob is next.
-        let alice = queue.join("w", 0, "alice", 100);
-        let bob = queue.join("w", 0, "bob", 100);
+        let alice = queue.join("w", Class::Heavy, 0, "alice", 100);
+        let bob = queue.join("w", Class::Heavy, 0, "bob", 100);
         assert!(queue.ahead(&bob));
         assert!(!queue.ahead(&alice));
         drop((alice, bob));
 
         // 1/400 is less than 0/100? No: zero starts always comes first, so the
         // heavy client with one start yields to the idle one.
-        queue.charge("w", "carol");
-        let carol = queue.join("w", 0, "carol", 400);
-        let dave = queue.join("w", 0, "dave", 100);
+        queue.charge("w", Class::Heavy, "carol");
+        let carol = queue.join("w", Class::Heavy, 0, "carol", 400);
+        let dave = queue.join("w", Class::Heavy, 0, "dave", 100);
         assert!(queue.ahead(&dave));
         assert!(!queue.ahead(&carol));
         drop((carol, dave));
@@ -373,11 +400,11 @@ mod tests {
         // Three starts each: carol at weight 400 has 3/400 of her share used,
         // dave at weight 100 has 3/100, so dave is four times over his.
         for _ in 0..3 {
-            queue.charge("w", "carol");
-            queue.charge("w", "dave");
+            queue.charge("w", Class::Heavy, "carol");
+            queue.charge("w", Class::Heavy, "dave");
         }
-        let carol = queue.join("w", 0, "carol", 400);
-        let dave = queue.join("w", 0, "dave", 100);
+        let carol = queue.join("w", Class::Heavy, 0, "carol", 400);
+        let dave = queue.join("w", Class::Heavy, 0, "dave", 100);
         assert!(
             queue.ahead(&carol),
             "carol is behind her share, she goes first"
@@ -422,9 +449,9 @@ mod tests {
     #[test]
     fn before_me_counts_every_better_ticket() {
         let (dir, queue) = scratch("before");
-        let first = queue.join("w", 0, "alice", 100);
-        let second = queue.join("w", 0, "alice", 100);
-        let third = queue.join("w", 0, "alice", 100);
+        let first = queue.join("w", Class::Heavy, 0, "alice", 100);
+        let second = queue.join("w", Class::Heavy, 0, "alice", 100);
+        let third = queue.join("w", Class::Heavy, 0, "alice", 100);
         assert_eq!(queue.before_me(&first), 0);
         assert_eq!(queue.before_me(&second), 1);
         assert_eq!(queue.before_me(&third), 2);
@@ -441,10 +468,10 @@ mod tests {
     #[test]
     fn a_stale_ticket_is_ignored_and_removed() {
         let (dir, queue) = scratch("stale");
-        let ghost = queue.join("w", -5, "ghost", 100);
+        let ghost = queue.join("w", Class::Heavy, -5, "ghost", 100);
         let now = FileTimes::new().set_modified(SystemTime::now() - Duration::from_secs(30));
         ghost.file.as_ref().expect("ticket").set_times(now).unwrap();
-        let live = queue.join("w", 0, "alice", 100);
+        let live = queue.join("w", Class::Heavy, 0, "alice", 100);
         assert!(
             queue.ahead(&live),
             "a dead waiter must not block a live one"
@@ -456,7 +483,7 @@ mod tests {
     #[test]
     fn dropping_the_lane_removes_its_ticket() {
         let (dir, queue) = scratch("drop");
-        let lane = queue.join("w", 0, "alice", 100);
+        let lane = queue.join("w", Class::Heavy, 0, "alice", 100);
         let path = lane.path.clone();
         assert!(path.exists());
         drop(lane);
@@ -470,7 +497,7 @@ mod tests {
         let blocker = dir.join("blocker");
         std::fs::write(&blocker, "not a dir").expect("write blocker");
         let queue = Queue::new(&blocker);
-        let lane = queue.join("w", 0, "alice", 100);
+        let lane = queue.join("w", Class::Heavy, 0, "alice", 100);
         assert!(queue.ahead(&lane), "a broken queue must never stop a job");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -478,8 +505,8 @@ mod tests {
     #[test]
     fn a_malformed_ticket_is_skipped_and_removed() {
         let (dir, queue) = scratch("malformed");
-        let lane = queue.join("w", 0, "alice", 100);
-        let junk = queue.dir("w").join("1-1.want");
+        let lane = queue.join("w", Class::Heavy, 0, "alice", 100);
+        let junk = queue.dir("w", Class::Heavy).join("1-1.want");
         std::fs::write(&junk, "garbage\n").expect("write junk ticket");
         assert!(
             queue.ahead(&lane),
@@ -503,7 +530,7 @@ mod tests {
     #[test]
     fn two_tickets_with_the_same_timestamp_still_order() {
         let (dir, queue) = scratch("tie");
-        let host_dir = queue.dir("w");
+        let host_dir = queue.dir("w", Class::Heavy);
         std::fs::create_dir_all(&host_dir).expect("host dir");
         let low = host_dir.join("7-100.want");
         let high = host_dir.join("7-200.want");
@@ -538,8 +565,8 @@ mod tests {
     #[test]
     fn old_starts_are_forgotten() {
         let (dir, queue) = scratch("ttl");
-        queue.charge("w", "alice");
-        let served = queue.dir("w").join("served");
+        queue.charge("w", Class::Heavy, "alice");
+        let served = queue.dir("w", Class::Heavy).join("served");
         let old = FileTimes::new().set_modified(SystemTime::now() - Duration::from_secs(600));
         File::options()
             .write(true)
@@ -547,8 +574,8 @@ mod tests {
             .unwrap()
             .set_times(old)
             .unwrap();
-        let alice = queue.join("w", 0, "alice", 100);
-        let bob = queue.join("w", 0, "bob", 100);
+        let alice = queue.join("w", Class::Heavy, 0, "alice", 100);
+        let bob = queue.join("w", Class::Heavy, 0, "bob", 100);
         // Alice's old lead is gone, so arrival order decides, not her history.
         assert!(queue.ahead(&alice));
         assert!(!queue.ahead(&bob));

@@ -12,7 +12,7 @@ is mostly in place. Read the pitch for why, this file for how.
 ## Build and test
 
 ```bash
-cargo test                       # 280 tests, including real ffmpeg 8.x fidelity
+cargo test                       # 319 tests, including real ffmpeg 8.x fidelity
 cargo bench                      # dispatch, journal, queue, progress, scheduler
 cargo clippy --all-targets -- -D warnings
 cargo build --release
@@ -51,8 +51,8 @@ renames a doc or an ADR.
 Layout: `src/main.rs` wires the dispatch, `config.rs` reads TOML, `paths.rs`
 maps client to worker roots, `transport.rs` picks SSH or the agent per host,
 `agent.rs` is the agent protocol and daemon, `state.rs` is the WAL and its
-flusher, `stats.rs` reads the journal back, `scheduler.rs` places jobs,
-`queue.rs` orders the waiters,
+flusher, `stats.rs` reads the journal back, `sizing.rs` turns the journal tail
+into a pool cap, `scheduler.rs` places jobs, `queue.rs` orders the waiters,
 `janitor.rs` repairs state.
 `config.example.toml` is the production pair.
 

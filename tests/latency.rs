@@ -41,6 +41,8 @@ fn setup() -> (Arc<rrffmpeg::config::Host>, Agent, PathBuf) {
     let host = rrffmpeg::config::Host {
         name: "loopback".into(),
         concurrency: 1,
+
+        light_concurrency: 2,
         capabilities: vec![],
         local: false,
         // /bin/true keeps the measurement on the dispatcher: no codec work.
@@ -165,6 +167,8 @@ fn dispatch_latency_ssh() {
     let host = Arc::new(Host {
         name: "localhost".into(),
         concurrency: 1,
+
+        light_concurrency: 2,
         capabilities: vec![],
         local: false,
         ffmpeg_bin: Some("/bin/true".into()),
@@ -305,6 +309,10 @@ fn journal_replay_at_rotation_cap() {
             }
         } else {
             Event::Started {
+                class: "heavy".to_string(),
+                pool: "heavy".to_string(),
+                job_kind: "transcode".to_string(),
+                input: "/media/ep.mkv".to_string(),
                 job: id,
                 host: "worker".into(),
                 elapsed_us: 400 + records % 900,
@@ -375,6 +383,8 @@ fn worker() -> Host {
     Host {
         name: "worker".into(),
         concurrency: 1,
+
+        light_concurrency: 2,
         capabilities: Vec::new(),
         local: false,
         ffmpeg_bin: None,
@@ -503,6 +513,8 @@ fn arg_and_stderr_cost() {
     let host = Host {
         name: "worker".into(),
         concurrency: 1,
+
+        light_concurrency: 2,
         capabilities: vec![],
         local: false,
         ffmpeg_bin: None,

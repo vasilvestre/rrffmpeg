@@ -8,12 +8,14 @@
 
 use crate::config::Program;
 use crate::{Error, Host, Job, Result};
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 pub trait Transport: Send + Sync {
     /// Run `job` on `host` with this process's stdio already wired.
@@ -26,6 +28,146 @@ pub trait Transport: Send + Sync {
 
     /// Is the remote process for `job_id` still running?
     fn job_alive(&self, host: &Host, job_id: &str) -> bool;
+}
+
+/// How often the local transport samples its child. One read of
+/// `/proc/<pid>/stat` and one stat of the output, so 30 s costs nothing.
+const PARK_INTERVAL: Duration = Duration::from_secs(30);
+/// Under 1% of one CPU means the job is not encoding.
+const QUIET_CPU: f64 = 0.01;
+/// Quiet for a whole minute, with nothing written, means parked: Jellyfin
+/// paused the stream and ffmpeg is waiting on stdin.
+const QUIET_WINDOW: Duration = Duration::from_secs(60);
+
+/// A change the sampler reports once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Park {
+    Parked,
+    Resumed,
+}
+
+/// The one file the job grows, or the directory a segment pattern fills. When
+/// there is none, the CPU alone decides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Output {
+    File(PathBuf),
+    Directory(PathBuf),
+}
+
+impl Output {
+    /// The last argument that is not a flag. Media arguments come as
+    /// `file:/path` or a plain path; `-`, a URL and `pipe:` write nowhere this
+    /// machine can stat, so they give no signal.
+    fn of(args: &[OsString]) -> Option<Output> {
+        let last = args.iter().rev().find(|arg| {
+            let text = arg.to_string_lossy();
+            // A lone `-` is an output (stdout), not a flag.
+            !(text.len() > 1 && text.starts_with('-'))
+        })?;
+        let text = last.to_string_lossy();
+        if text == "-" || text.contains("://") || text.starts_with("pipe:") {
+            return None;
+        }
+        let path = PathBuf::from(last);
+        if text.contains('%') {
+            path.parent()
+                .map(|dir| Output::Directory(dir.to_path_buf()))
+        } else {
+            Some(Output::File(path))
+        }
+    }
+
+    /// Bytes written so far. A missing file counts as zero, so the first byte
+    /// is growth.
+    fn written(&self) -> u64 {
+        match self {
+            Output::File(path) => std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0),
+            Output::Directory(dir) => std::fs::read_dir(dir)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .filter_map(|entry| entry.metadata().ok())
+                        .map(|meta| meta.len())
+                        .sum()
+                })
+                .unwrap_or(0),
+        }
+    }
+}
+
+/// One job's CPU and output, sampled on a timer. It turns low use plus no
+/// output into a pause, and the next sign of life into a resumption. Pure
+/// state: the caller supplies the clock and does the reporting.
+#[derive(Debug)]
+struct ParkWatch {
+    pid: i32,
+    output: Option<Output>,
+    /// How long quiet has to last before the job counts as parked.
+    window: Duration,
+    /// Ticks and output bytes at the previous sample, with its clock.
+    last: Option<(u64, u64, Instant)>,
+    /// When the current quiet run began.
+    quiet_since: Option<Instant>,
+    parked: bool,
+}
+
+impl ParkWatch {
+    fn new(pid: i32, output: Option<Output>) -> ParkWatch {
+        ParkWatch {
+            pid,
+            output,
+            window: QUIET_WINDOW,
+            last: None,
+            quiet_since: None,
+            parked: false,
+        }
+    }
+
+    /// Take one sample and report a change, if there is one. The first call
+    /// only sets the baseline.
+    fn step(&mut self, now: Instant) -> Option<Park> {
+        let ticks = cpu_ticks(self.pid)?;
+        let written = self.output.as_ref().map(Output::written).unwrap_or(0);
+        let (last_ticks, last_written, last_now) = self.last.replace((ticks, written, now))?;
+        let elapsed = now
+            .saturating_duration_since(last_now)
+            .as_secs_f64()
+            .max(0.001);
+        let cpu = ticks.saturating_sub(last_ticks) as f64 / ticks_per_second() / elapsed;
+        if cpu >= QUIET_CPU || written != last_written {
+            let was = self.parked;
+            self.parked = false;
+            self.quiet_since = None;
+            return was.then_some(Park::Resumed);
+        }
+        let since = *self.quiet_since.get_or_insert(now);
+        if self.parked || now.saturating_duration_since(since) < self.window {
+            return None;
+        }
+        self.parked = true;
+        Some(Park::Parked)
+    }
+}
+
+/// User plus system CPU of `pid`, in clock ticks, from `/proc/<pid>/stat`.
+/// `None` when the process is gone or the file cannot be read.
+fn cpu_ticks(pid: i32) -> Option<u64> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name sits in parentheses and may contain spaces, so the
+    // fields are counted from the closing one.
+    let rest = text.rsplit_once(')')?.1;
+    let mut fields = rest.split_whitespace();
+    // state, ppid, pgrp, session, tty, tpgid, flags, minflt, cminflt, majflt,
+    // cmajflt come first; utime and stime follow.
+    let utime: u64 = fields.nth(11)?.parse().ok()?;
+    let stime: u64 = fields.next()?.parse().ok()?;
+    Some(utime + stime)
+}
+
+fn ticks_per_second() -> f64 {
+    // SAFETY: sysconf reads a process constant and touches no pointer.
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if ticks > 0 { ticks as f64 } else { 100.0 }
 }
 
 pub struct Ssh {
@@ -332,6 +474,25 @@ pub struct Local {
     pub pid_dir: PathBuf,
     /// `local_env`; a host's own `env` goes on top.
     pub env: std::collections::BTreeMap<String, String>,
+    /// Where a parked job leaves its trace. `None` starts no sampler.
+    park: Option<Parking>,
+}
+
+/// Everything the sampler needs to report a pause: the journal for the
+/// `Parked` and `Resumed` lines, and the state dir for the slot marker another
+/// process reads when it places a job.
+#[derive(Clone)]
+pub struct Parking {
+    pub journal: Arc<crate::state::Journal>,
+    pub state_dir: PathBuf,
+}
+
+impl std::fmt::Debug for Parking {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Parking")
+            .field("state_dir", &self.state_dir)
+            .finish()
+    }
 }
 
 impl Local {
@@ -357,7 +518,69 @@ impl Local {
             ffprobe,
             pid_dir,
             env,
+            park: None,
         })
+    }
+
+    /// Let the local transport notice a job that stopped using the CPU and
+    /// stopped writing, so placement discounts it (ADR 0033). Without this the
+    /// transport runs jobs and reports nothing about them.
+    pub fn parking(
+        mut self,
+        journal: Arc<crate::state::Journal>,
+        state_dir: &std::path::Path,
+    ) -> Local {
+        self.park = Some(Parking {
+            journal,
+            state_dir: state_dir.to_path_buf(),
+        });
+        self
+    }
+
+    /// Start the parked sampler, if this transport reports pauses. The thread
+    /// owns the whole loop so a job that never pauses costs nothing else.
+    fn watch(
+        &self,
+        host: &Host,
+        job: &Job,
+        pid: u32,
+    ) -> Option<(std::thread::JoinHandle<()>, std::sync::mpsc::Sender<()>)> {
+        let park = self.park.as_ref()?;
+        let journal = Arc::clone(&park.journal);
+        let locks = crate::locks::LockDir::new(&park.state_dir);
+        let host_name = host.name.clone();
+        let job_id = job.id.clone();
+        let output = Output::of(&job.args);
+        let (stop, quiet) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::Builder::new()
+            .name("park".to_string())
+            .spawn(move || {
+                let mut watch = ParkWatch::new(pid as i32, output);
+                loop {
+                    match quiet.recv_timeout(PARK_INTERVAL) {
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        // The job ended or the dispatcher is gone.
+                        _ => return,
+                    }
+                    match watch.step(Instant::now()) {
+                        Some(Park::Parked) => {
+                            journal.append(crate::state::Event::Parked {
+                                job: job_id.clone(),
+                            });
+                            locks.mark_parked(&host_name, &job_id, true);
+                        }
+                        Some(Park::Resumed) => {
+                            journal.append(crate::state::Event::Resumed {
+                                job: job_id.clone(),
+                            });
+                            locks.mark_parked(&host_name, &job_id, false);
+                        }
+                        None => {}
+                    }
+                }
+            })
+            .ok()?;
+        Some((handle, stop))
     }
 
     fn binary(&self, program: Program) -> &PathBuf {
@@ -405,15 +628,24 @@ impl Transport for Local {
             // Same wiring as ssh: only the tapped stream is piped.
             .stderr(Stdio::piped());
         // Jellyfin cancels a transcode by killing the process it started, which
-        // is this one. Without this, the ffmpeg child outlives the dispatcher,
-        // keeps writing into the same output directory and holds the GPU.
-        // Local mode never had that problem: it execs in place.
+        // is this one. The child must die with it, or it outlives the
+        // dispatcher, keeps writing into the same output directory and holds
+        // the GPU. Local mode used to exec in place, so one signal ended both;
+        // a host with `local = true` spawns a child instead, and nothing else
+        // carries that guarantee.
+        //
+        // SIGKILL, not SIGTERM: on SIGTERM ffmpeg writes its trailer and exits
+        // in its own time, which is exactly the "child still running" the
+        // killed wrapper must not leave behind. A new session keeps the child
+        // out of the terminal's process group, so Ctrl-C reaches this process
+        // alone, and the death signal stops the child once, not twice.
         // SAFETY: the closure runs in the forked child before exec, where only
-        // async-signal-safe calls are allowed. prctl is one, and it returns a
-        // value this ignores rather than touching any shared state.
+        // async-signal-safe calls are allowed. setsid and prctl are, and both
+        // return values this ignores instead of touching shared state.
         unsafe {
             command.pre_exec(|| {
-                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                libc::setsid();
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
                 Ok(())
             });
         }
@@ -433,6 +665,7 @@ impl Transport for Local {
             return Err(Error::Io(e, format!("pid file {}", pid_file.display())));
         }
 
+        let watch = self.watch(host, job, child.id());
         let relay = child.stderr.take().map(|err| {
             if stderr_as_stdout {
                 relay(err, std::io::stdout())
@@ -441,6 +674,12 @@ impl Transport for Local {
             }
         });
         let status = child.wait();
+        if let Some((sampler, stop)) = watch {
+            // Dropping the sender ends the sampler's wait at once, so a job
+            // that ends does not hold the dispatcher for a whole interval.
+            drop(stop);
+            let _ = sampler.join();
+        }
         if let Some(relay) = relay {
             let _ = relay.join();
         }
@@ -653,6 +892,7 @@ mod tests {
             local: false,
             name: "worker".into(),
             concurrency: 1,
+            light_concurrency: 2,
             capabilities: vec![],
             ffmpeg_bin: None,
             ffprobe_bin: None,
@@ -687,6 +927,58 @@ mod tests {
             priority: 0,
             capabilities: Vec::new(),
         }
+    }
+
+    #[test]
+    fn only_a_regular_output_argument_gives_a_growth_signal() {
+        let args = |list: &[&str]| -> Vec<OsString> { list.iter().map(OsString::from).collect() };
+        assert_eq!(
+            Output::of(&args(&[
+                "-i",
+                "file:/m/x.mkv",
+                "-f",
+                "hls",
+                "/tmp/o/seg%05d.ts"
+            ])),
+            Some(Output::Directory(PathBuf::from("/tmp/o")))
+        );
+        assert_eq!(
+            Output::of(&args(&["-i", "file:/m/x.mkv", "/tmp/o/x.mp4"])),
+            Some(Output::File(PathBuf::from("/tmp/o/x.mp4")))
+        );
+        // No file to stat: the CPU signal alone has to decide.
+        assert_eq!(Output::of(&args(&["-i", "file:/m/x.mkv", "-"])), None);
+        assert_eq!(
+            Output::of(&args(&["-i", "file:/m/x.mkv", "rtmp://host/live"])),
+            None
+        );
+        assert_eq!(Output::of(&args(&["-version"])), None);
+    }
+
+    #[test]
+    fn a_sleeping_child_parks_and_a_busy_one_resumes() {
+        let _guard = crate::exclusive();
+        // Two seconds of nothing, then a busy loop in the same process, so a
+        // change of CPU use is the only signal.
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 2; while :; do :; done")
+            .spawn()
+            .expect("spawn sh");
+        let mut watch = ParkWatch::new(child.id() as i32, None);
+        // The window a production run gets is a minute; the rule is the same.
+        watch.window = Duration::from_millis(80);
+        let mut changes = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < deadline && changes.len() < 2 {
+            if let Some(change) = watch.step(Instant::now()) {
+                changes.push(change);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(changes, vec![Park::Parked, Park::Resumed]);
     }
 
     #[test]

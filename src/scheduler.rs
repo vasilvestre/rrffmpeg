@@ -3,6 +3,7 @@
 //! Slots live in the state dir as flock files, so the cap holds across the
 //! one-process-per-job model Jellyfin uses.
 
+use crate::Class;
 use crate::Host;
 use crate::Job;
 use crate::locks::{LockDir, SlotGuard};
@@ -31,6 +32,11 @@ const REFRESH_EVERY: Duration = Duration::from_millis(500);
 /// Passes over the host list before `acquire` gives up, so a lost race cannot
 /// spin forever.
 const ACQUIRE_PASSES: usize = 2;
+
+/// Longest a Light job waits for a light slot when no local host can take it.
+/// Jellyfin kills a frame job that produced nothing in 20 s, so this stays far
+/// below that: waiting is worse than starting a second one.
+pub const LIGHT_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub struct Lease {
@@ -77,18 +83,20 @@ impl Scheduler {
     /// Reserve a slot on the eligible host with the best placement order, see
     /// [`beats`].
     pub fn acquire(&self, job: &Job) -> Option<Lease> {
+        let class = job.class();
         // Someone already waits for a slot this job could use, so queue up
         // behind them. A caller that skips this takes the slot a waiter slept
-        // through, and a stream of fresh callers can starve it for good.
+        // through, and a stream of fresh callers can starve it for good. Each
+        // pool has its own lane, so a Light job only asks about its own.
         for host in &self.hosts {
-            if self.eligible(host, job) && self.queue.has_waiters(&host.name) {
+            if self.eligible(host, job) && self.queue.has_waiters(&host.name, class) {
                 return None;
             }
         }
         for _ in 0..ACQUIRE_PASSES {
             let index = self.pick_host(job)?;
             let host = &self.hosts[index];
-            if let Some(guard) = self.locks.try_acquire(host, &job.id) {
+            if let Some(guard) = self.locks.try_acquire(host, &job.id, class) {
                 return Some(Lease {
                     host: host.clone(),
                     _guard: guard,
@@ -106,6 +114,7 @@ impl Scheduler {
     /// share of recent starts.
     pub fn acquire_blocking(&self, job: &Job, timeout: Duration) -> Option<Lease> {
         let deadline = Instant::now() + timeout;
+        let class = job.class();
         if let Some(lease) = self.acquire(job) {
             return Some(lease);
         }
@@ -134,12 +143,14 @@ impl Scheduler {
                 if let Some(lane) = lanes.get(&host.name) {
                     // Pass when fewer tickets rank ahead than there are slots
                     // free right now: the first jobs go at once, in order.
-                    let open = host.concurrency.saturating_sub(self.locks.occupancy(host));
+                    let open = host
+                        .slots(class)
+                        .saturating_sub(self.locks.occupancy(host, class));
                     ready = self.queue.before_me(lane) < open;
-                    if ready && let Some(guard) = self.locks.try_acquire(host, &job.id) {
+                    if ready && let Some(guard) = self.locks.try_acquire(host, &job.id, class) {
                         // Only a job that had to wait is charged, so the
                         // shares measure contention and not idle history.
-                        self.queue.charge(&host.name, &self.client);
+                        self.queue.charge(&host.name, class, &self.client);
                         return Some(Lease {
                             host: host.clone(),
                             _guard: guard,
@@ -161,13 +172,14 @@ impl Scheduler {
     /// matters: it is how the other waiters see this job coming.
     fn lanes(&self, job: &Job) -> HashMap<String, Lane> {
         let mut lanes = HashMap::new();
+        let class = job.class();
         for host in &self.hosts {
             if !self.eligible(host, job) {
                 continue;
             }
             let lane = self
                 .queue
-                .join(&host.name, job.priority, &self.client, self.weight);
+                .join(&host.name, class, job.priority, &self.client, self.weight);
             lanes.insert(host.name.clone(), lane);
         }
         lanes
@@ -190,11 +202,29 @@ impl Scheduler {
         self.locks.is_down(host)
     }
 
-    /// Jobs running on `host` right now, this one included. Reads the slot
-    /// locks rather than the journal, so recording a start never replays the
-    /// journal on the dispatch path.
-    pub fn running(&self, host: &Host) -> usize {
-        self.locks.occupancy(host)
+    /// Jobs running in `class`'s pool on `host` right now, this one included.
+    /// Reads the slot locks rather than the journal, so recording a start
+    /// never replays the journal on the dispatch path.
+    pub fn running(&self, host: &Host, class: Class) -> usize {
+        self.locks.occupancy(host, class)
+    }
+
+    /// The machine this process runs on, when it takes jobs itself and can
+    /// read this job's input. A Light job that finds its light pool full runs
+    /// here instead of waiting: a second frame job costs little, and waiting
+    /// costs Jellyfin the whole extraction.
+    pub fn local_host(&self, job: &Job) -> Option<Host> {
+        self.hosts
+            .iter()
+            .find(|host| host.local && self.eligible(host, job))
+            .cloned()
+    }
+
+    /// Clear the slot files whose recorded pid is gone. Cheap enough for every
+    /// janitor cycle, and it is what makes `coord/*/slot.*` readable after a
+    /// killed client.
+    pub fn reap_dead_slots(&self, host: &Host) -> usize {
+        self.locks.reap_slots(host)
     }
 
     /// Every capability the job needs must be advertised. One match is not
@@ -215,21 +245,32 @@ impl Scheduler {
             && paths::reads_inputs(host, &job.args)
     }
 
-    /// Best eligible host with a free slot, or None.
+    /// Best eligible host with a free slot in the job's pool, or None.
     fn pick_host(&self, job: &Job) -> Option<usize> {
+        let class = job.class();
         let mut best: Option<(usize, usize)> = None;
         for (index, host) in self.hosts.iter().enumerate() {
             if !self.eligible(host, job) {
                 continue;
             }
-            let running = self.locks.occupancy(host);
-            if running >= host.concurrency {
+            let running = self.locks.occupancy(host, class);
+            let cap = host.slots(class);
+            if running >= cap {
                 continue;
             }
             best = match best {
                 None => Some((index, running)),
                 Some((current, current_running)) => {
-                    if beats(host, running, &self.hosts[current], current_running, job) {
+                    let current_cap = self.hosts[current].slots(class);
+                    if beats(
+                        host,
+                        running,
+                        cap,
+                        &self.hosts[current],
+                        current_running,
+                        current_cap,
+                        job,
+                    ) {
                         Some((index, running))
                     } else {
                         Some((current, current_running))
@@ -243,13 +284,15 @@ impl Scheduler {
 
 /// Whether `host` beats `incumbent` for this job: a host that needs no ssh
 /// when the job needs no accelerator, then a higher `prefer`, then the lower
-/// running/concurrency ratio, then the name. Declaration order is never a
-/// rule, so swapping two `[[hosts]]` blocks changes nothing (ADR 0031).
+/// running/slots ratio, then the name. Declaration order is never a rule, so
+/// swapping two `[[hosts]]` blocks changes nothing (ADR 0031).
 fn beats(
     host: &Host,
     running: usize,
+    cap: usize,
     incumbent: &Host,
     incumbent_running: usize,
+    incumbent_cap: usize,
     job: &Job,
 ) -> bool {
     if job.capabilities.is_empty() {
@@ -261,8 +304,8 @@ fn beats(
     if host.prefer != incumbent.prefer {
         return host.prefer > incumbent.prefer;
     }
-    let candidate = running as u128 * incumbent.concurrency as u128;
-    let current = incumbent_running as u128 * host.concurrency as u128;
+    let candidate = running as u128 * incumbent_cap as u128;
+    let current = incumbent_running as u128 * cap as u128;
     if candidate != current {
         return candidate < current;
     }
@@ -309,6 +352,7 @@ mod tests {
             local: false,
             name: name.to_string(),
             concurrency,
+            light_concurrency: 2,
             capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
             ffmpeg_bin: None,
             ffprobe_bin: None,
@@ -544,12 +588,12 @@ mod tests {
         let lease = scheduler.acquire(&job(0, &[])).expect("a lease");
         let host = lease.host.clone();
         // The lease already holds one slot, so the count includes this job.
-        assert_eq!(scheduler.running(&host), 1);
+        assert_eq!(scheduler.running(&host, Class::Heavy), 1);
         let second = scheduler.acquire(&job(0, &[])).expect("a second slot");
-        assert_eq!(scheduler.running(&host), 2);
+        assert_eq!(scheduler.running(&host, Class::Heavy), 2);
         drop(second);
         drop(lease);
-        assert_eq!(scheduler.running(&host), 0);
+        assert_eq!(scheduler.running(&host, Class::Heavy), 0);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -664,7 +708,7 @@ mod tests {
         };
         thread::sleep(Duration::from_millis(100));
         assert!(
-            scheduler.queue.has_waiters("w"),
+            scheduler.queue.has_waiters("w", Class::Heavy),
             "the waiter must publish a ticket"
         );
 
@@ -854,6 +898,122 @@ mod tests {
         for handle in handles {
             handle.join().expect("acquire thread");
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The extraction Jellyfin runs for trickplay, in the shape the scheduler
+    /// sees it.
+    fn light_job() -> Job {
+        Job {
+            args: vec![
+                std::ffi::OsString::from("-skip_frame"),
+                std::ffi::OsString::from("nokey"),
+                std::ffi::OsString::from("-f"),
+                std::ffi::OsString::from("image2"),
+            ],
+            ..job(0, &[])
+        }
+    }
+
+    /// The defect this split fixes: a trickplay scan waited for a transcode and
+    /// Jellyfin killed it for producing no frames. A Light job now has its own
+    /// pool, so it starts while both heavy slots are busy.
+    #[test]
+    fn a_light_job_takes_its_own_pool_while_transcodes_fill_the_heavy_one() {
+        let (dir, scheduler) = build(vec![host("w", 1, &[])], "light-own-pool");
+        let _serial = crate::exclusive();
+        let transcode = scheduler.acquire(&job(0, &[])).expect("the heavy slot");
+        assert!(
+            scheduler.acquire(&job(0, &[])).is_none(),
+            "the heavy pool is full"
+        );
+
+        let started = Instant::now();
+        let first = scheduler
+            .acquire(&light_job())
+            .expect("a light slot is free next to the transcode");
+        assert_eq!(first.host.name, "w");
+        assert!(started.elapsed() < Duration::from_millis(100));
+        let second = scheduler
+            .acquire(&light_job())
+            .expect("the second light slot");
+        assert!(
+            scheduler.acquire(&light_job()).is_none(),
+            "the light pool is capped at light_concurrency"
+        );
+        assert_eq!(scheduler.running(&transcode.host, Class::Heavy), 1);
+        assert_eq!(scheduler.running(&transcode.host, Class::Light), 2);
+        drop((first, second, transcode));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Waiting for a heavy slot is not this job's problem: a queued transcode
+    /// holds a ticket in the heavy lane only.
+    #[test]
+    fn a_light_job_does_not_queue_behind_a_waiting_transcode() {
+        let (dir, locks) = scratch("light-no-queue");
+        let _serial = crate::exclusive();
+        let scheduler = Arc::new(Scheduler::new(
+            vec![host("w", 1, &[])],
+            locks,
+            Duration::from_secs(60),
+        ));
+        let held = scheduler.acquire(&job(0, &[])).expect("the heavy slot");
+        let waiter = {
+            let scheduler = Arc::clone(&scheduler);
+            thread::spawn(move || scheduler.acquire_blocking(&job(0, &[]), Duration::from_secs(2)))
+        };
+        thread::sleep(Duration::from_millis(150));
+        assert!(
+            scheduler.queue.has_waiters("w", Class::Heavy),
+            "the transcode must be queued"
+        );
+
+        let light = scheduler
+            .acquire(&light_job())
+            .expect("a light job skips the heavy queue");
+        assert_eq!(light.host.name, "w");
+
+        drop(light);
+        drop(held);
+        assert!(waiter.join().expect("waiter thread").is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// When the light pool is full, the local host is what the dispatcher
+    /// overflows to, so the caller can run the job here instead of waiting.
+    #[test]
+    fn a_full_light_pool_offers_the_local_machine() {
+        let (dir, locks) = scratch("light-local");
+        let _serial = crate::exclusive();
+        let mut here = readable(host("client", 1, &[]), &["/mnt/local"]);
+        here.local = true;
+        let scheduler = Scheduler::new(vec![here], locks, Duration::from_secs(60));
+
+        let a = scheduler.acquire(&light_job()).expect("light slot 1");
+        let b = scheduler.acquire(&light_job()).expect("light slot 2");
+        assert!(
+            scheduler.acquire(&light_job()).is_none(),
+            "the light pool is full"
+        );
+        assert!(
+            scheduler
+                .acquire_blocking(&light_job(), Duration::from_millis(50))
+                .is_none(),
+            "a full light pool must not queue the job"
+        );
+        let local = scheduler
+            .local_host(&light_job())
+            .expect("the local machine takes the overflow");
+        assert_eq!(local.name, "client");
+        // Only for an input this machine can read: overflowing a job it cannot
+        // open would fail in ffmpeg instead of starting.
+        assert!(
+            scheduler
+                .local_host(&input_job("file:/archive/film.mkv", &[]))
+                .is_none()
+        );
+        drop((a, b));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

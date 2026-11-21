@@ -533,6 +533,28 @@ probe. A host whose fault clears between two probes waits for the next probe,
 so it comes back in one interval, here 9996 to 9999 ms. Lower the interval to
 recover faster. The probe itself is not the limit.
 
+## Two pools: a Light job next to a transcode
+
+A Light job is an `ffprobe`, a single-frame thumbnail, an MJPEG sprite or a
+`-skip_frame nokey` trickplay scan (ADR 0032). It takes a slot from
+`light_concurrency`, never from `concurrency`, so a running transcode does not
+delay it. Two shapes were measured on one Ubuntu box with the release binary,
+`queue_wait_secs = 60`, and a `local = true` host whose `local_ffmpeg` is
+`/bin/true`; another process held the slots with `flock`.
+
+```text
+one heavy slot held, light pool free   n=20  p50 3 ms  p99 5 ms
+heavy slot and both light slots held   n=20  p50 4 ms  p99 5 ms
+```
+
+The second row is the overflow: the light pool is full, so the job runs on the
+local binary without a slot. Before the split, the first row waited
+`queue_wait_secs` and printed `no worker slot after 60s, running locally`; on
+the production client that was the 60 s `ffmpeg -version` measured on
+2026-11-21. The check is
+`a_light_job_starts_while_the_only_heavy_slot_is_held` in
+`tests/light_pool.rs`.
+
 ## What these numbers do not cover
 
 - A real network. Loopback has no RTT, no loss, no reordering. The `netem` runs

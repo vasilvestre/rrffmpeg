@@ -123,6 +123,20 @@ Ship the smallest thing that is strictly better than rffmpeg. State today:
 - [x] Per-host concurrency cap and capability matching. The cap holds across
   processes with `flock` slot files under `state_dir/coord/`, and the
   host-down verdict is shared with an expiry.
+- [x] Two pools per host: `concurrency` for transcodes, `light_concurrency`
+  (default 2) for the work Jellyfin needs to finish in seconds, which is
+  `ffprobe`, a single thumbnail, an MJPEG sprite and a `-skip_frame nokey`
+  trickplay scan. A Light job never waits behind a transcode, and when the
+  light pool is full on a `local = true` host it runs on the client at once
+  instead of waiting. ADR 0032.
+- [x] Caps sized from the journal. `concurrency = "auto"` (and an absent key
+  on a `local = true` host) takes the 5th percentile of that host's own solo
+  speeds for the content class, divides by 1.3, and clamps to
+  `[1, min(4, cpus / 2)]`. Ten finishes at 1.3x or better raise it by one,
+  three under 1.0x lower it by one, both derived from the same tail with no
+  stored counter. A job that stops using the CPU and stops writing is parked:
+  it keeps its slot but stops counting toward the cap, so a paused stream does
+  not look like a slow GPU. Zero and `unlimited` are a config error. ADR 0033.
 - [x] Priority across processes, and a weight per client. A waiter publishes a
   ticket per eligible host and takes a slot only when no better ticket waits:
   class first, so a probe beats a transcode, then `starts / client_weight`, so

@@ -20,6 +20,7 @@ pub fn host(name: &str, concurrency: usize) -> rrffmpeg::Host {
     rrffmpeg::Host {
         name: name.to_string(),
         concurrency,
+        light_concurrency: 2,
         capabilities: Vec::new(),
         local: false,
         ffmpeg_bin: None,

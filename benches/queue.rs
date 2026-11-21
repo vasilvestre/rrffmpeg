@@ -20,7 +20,7 @@ fn busy_lane(tag: &str) -> (PathBuf, Queue, Lane) {
 
     // One real ticket creates the lane directory. Read its path back from the
     // public coord root, so no private helper is needed.
-    let lane = queue.join("worker", 0, "client", 100);
+    let lane = queue.join("worker", rrffmpeg::Class::Heavy, 0, "client", 100);
     let lane_dir = only_subdir(&coord).join("queue");
 
     // Fill the lane with tickets in the queue's own on-disk format:
@@ -48,7 +48,7 @@ fn join(c: &mut Criterion) {
     let (base, queue, lane) = busy_lane("queue-join");
     c.bench_function("queue_join_drop", |b| {
         b.iter(|| {
-            let ticket = queue.join("worker", 0, "client", 100);
+            let ticket = queue.join("worker", rrffmpeg::Class::Heavy, 0, "client", 100);
             drop(ticket);
         });
     });

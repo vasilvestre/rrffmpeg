@@ -2,7 +2,8 @@
 //!
 //! One thread, one cycle per `every`:
 //!
-//! 1. Reap: for each active job, ask the worker whether its process still runs.
+//! 1. Reap: clear slot files whose recorded process is gone, then for each
+//!    active job ask the worker whether its process still runs.
 //!    A job seen in two consecutive cycles that is reported dead gets a
 //!    `Reaped` event. Reaping goes first because a stale active row is the
 //!    defect that silently undercounts slots, and it uses no extra network
@@ -116,8 +117,25 @@ fn cycle(
     reaped: &mut HashSet<String>,
 ) {
     let hosts = scheduler.hosts();
+    reap_slots(scheduler, &hosts);
     reap(journal, transport, &hosts, seen, reaped);
     reconcile(scheduler, journal, transport, &hosts);
+}
+
+/// Clear the slot files of processes that are gone, on every host including
+/// the local one.
+///
+/// The kernel drops the flock when its holder dies, so a killed dispatcher
+/// already frees its slot for placement. This keeps the pid written in the
+/// file from naming a live stranger after the kernel reuses it, which is what
+/// a reader of `coord/*/slot.*` and the acceptance check look at.
+fn reap_slots(scheduler: &Scheduler, hosts: &[Host]) {
+    for host in hosts {
+        let freed = scheduler.reap_dead_slots(host);
+        if freed > 0 {
+            eprintln!("rrffmpeg: freed {freed} dead slot(s) on {}", host.name);
+        }
+    }
 }
 
 fn reap(
@@ -240,6 +258,7 @@ mod tests {
             local: false,
             name: name.to_string(),
             concurrency: 1,
+            light_concurrency: 2,
             capabilities: Vec::new(),
             ffmpeg_bin: None,
             ffprobe_bin: None,
@@ -288,6 +307,10 @@ mod tests {
             elapsed_us: 0,
             program: "ffmpeg".to_string(),
             in_flight: 1,
+            class: "heavy".to_string(),
+            pool: "heavy".to_string(),
+            job_kind: "transcode".to_string(),
+            input: "/media/ep.mkv".to_string(),
         });
         journal
             .active_jobs()

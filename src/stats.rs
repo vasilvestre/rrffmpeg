@@ -39,7 +39,17 @@ pub struct Job {
     /// Set once a Finished event arrives.
     pub duration_us: Option<u64>,
     pub code: Option<i32>,
+    /// `light` or `heavy`, as the dispatcher classified the job.
+    pub class: String,
+    /// What the job does, for example `trickplay` or `transcode`. `unknown`
+    /// when the journal predates the field.
+    pub kind: String,
+    /// The input path with `file:` stripped, empty when the job had no `-i`.
+    pub input: String,
     pub reaped: bool,
+    /// Microseconds the job spent parked: Jellyfin paused the stream, so the
+    /// job used no CPU and wrote nothing. It held its slot the whole time.
+    pub parked_us: u64,
     /// What the worker's ffmpeg said about the job. All optional.
     pub stats: crate::state::Stats,
 }
@@ -62,6 +72,9 @@ pub struct Summary {
     pub work: BTreeMap<String, usize>,
     pub hosts: BTreeMap<String, HostTally>,
     pub codes: BTreeMap<i32, usize>,
+    /// Jobs per class, so a reader sees how much of the load is a probe or a
+    /// thumbnail instead of a transcode.
+    pub classes: BTreeMap<String, usize>,
     pub jobs: Vec<Job>,
     pub open: usize,
     /// Reap events that matched a start.
@@ -69,6 +82,10 @@ pub struct Summary {
     /// Events whose start line is missing, so they cannot be attached to a job.
     pub orphan_finish: usize,
     pub orphan_reaped: usize,
+    /// The cap each host's own journal gives each content class, with the
+    /// sample count and the p05 behind it. Derived from the same tail a
+    /// dispatcher reads, never from a stored number (ADR 0033).
+    pub sizes: BTreeMap<String, Vec<crate::sizing::Size>>,
 }
 
 impl Summary {
@@ -84,6 +101,8 @@ impl Summary {
             ..Self::default()
         };
         let mut index: BTreeMap<String, usize> = BTreeMap::new();
+        // Jobs parked right now, with the timestamp they parked at.
+        let mut parked_since: BTreeMap<String, u64> = BTreeMap::new();
 
         for record in records {
             match &record.ev {
@@ -91,6 +110,9 @@ impl Summary {
                     job,
                     host,
                     elapsed_us,
+                    class,
+                    job_kind,
+                    input,
                     ..
                 } => {
                     let slot = summary.jobs.len();
@@ -102,11 +124,16 @@ impl Summary {
                         started_ts: record.ts,
                         duration_us: None,
                         code: None,
+                        class: unknown_if_empty(class),
+                        kind: unknown_if_empty(job_kind),
+                        input: input.clone(),
                         reaped: false,
+                        parked_us: 0,
                         stats: crate::state::Stats::default(),
                     });
                     let tally = summary.hosts.entry(host.clone()).or_default();
                     tally.jobs += 1;
+                    *summary.classes.entry(unknown_if_empty(class)).or_insert(0) += 1;
                 }
                 Event::Finished {
                     job, code, stats, ..
@@ -115,6 +142,11 @@ impl Summary {
                         summary.orphan_finish += 1;
                         continue;
                     };
+                    // A job that ends while parked spent its last interval
+                    // parked too.
+                    if let Some(since) = parked_since.remove(job) {
+                        summary.jobs[slot].parked_us += record.ts.saturating_sub(since);
+                    }
                     let started = summary.jobs[slot].started_ts;
                     let job = &mut summary.jobs[slot];
                     job.code = Some(*code);
@@ -134,6 +166,16 @@ impl Summary {
                         summary.orphan_reaped += 1;
                     }
                 }
+                Event::Parked { job } => {
+                    parked_since.entry(job.clone()).or_insert(record.ts);
+                }
+                Event::Resumed { job } => {
+                    if let (Some(&slot), Some(since)) = (index.get(job), parked_since.remove(job)) {
+                        summary.jobs[slot].parked_us += record.ts.saturating_sub(since);
+                    }
+                }
+                // An audit line for a startup, not a job.
+                Event::Sized { .. } => {}
                 Event::HostDown { host } => {
                     summary.hosts.entry(host.clone()).or_default().down += 1;
                 }
@@ -180,6 +222,7 @@ impl Summary {
         }
         summary.speed.sort_unstable();
         summary.fps.sort_unstable();
+        summary.sizes = sizes(records);
         summary
     }
 
@@ -228,6 +271,14 @@ impl Summary {
                 .collect();
             out.push_str(&format!("work      {}\n", labels.join("  ")));
         }
+        if !self.classes.is_empty() {
+            let classes: Vec<String> = self
+                .classes
+                .iter()
+                .map(|(name, n)| format!("{name} {n}"))
+                .collect();
+            out.push_str(&format!("class     {}\n", classes.join("  ")));
+        }
         if !self.codes.is_empty() {
             let codes: Vec<String> = self
                 .codes
@@ -242,7 +293,123 @@ impl Summary {
                 tally.jobs, tally.failed, tally.down, tally.up
             ));
         }
+        for (host, sizes) in &self.sizes {
+            for size in sizes {
+                // The number the next dispatch will use, and the measure it
+                // came from: a cap of 1 with a p05 of 1.2x says the host has
+                // 20% of headroom, not that nobody measured it.
+                out.push_str(&format!(
+                    "size      host {host}  class {:<24} cap {}  n {:<5} p05 {}\n",
+                    size.key
+                        .as_ref()
+                        .map_or_else(|| "heavy".to_string(), |key| key.label()),
+                    size.cap,
+                    size.samples,
+                    match size.p05 {
+                        Some(p05) => format!("{p05:.2}x"),
+                        None => "none".to_string(),
+                    }
+                ));
+            }
+        }
+        out.push_str(&self.parked());
+        out.push_str(&self.breakdown());
         out
+    }
+
+    /// Parked time per job, and the total: a paused job holds a slot and feeds
+    /// nobody, so a rising total is what a cap has to discount.
+    fn parked(&self) -> String {
+        let mut count = 0;
+        let mut total = 0;
+        let mut longest = 0;
+        for job in &self.jobs {
+            if job.parked_us > 0 {
+                count += 1;
+                total += job.parked_us;
+                longest = longest.max(job.parked_us);
+            }
+        }
+        if count == 0 {
+            return "parked    none\n".to_string();
+        }
+        format!(
+            "parked    {count} of {} jobs, {} total, longest {}\n",
+            self.jobs.len(),
+            human(total),
+            human(longest)
+        )
+    }
+
+    /// Three groups of rows: what the job does, what it cost, and the light
+    /// jobs that waited anyway. A blank line sets them apart from the totals.
+    fn breakdown(&self) -> String {
+        let mut out = String::from("\n");
+        for (name, group) in self.grouped(kind_of) {
+            out.push_str(&group.line("kind", &name));
+        }
+        for (name, group) in self.grouped(class_of) {
+            out.push_str(&group.line("class", &name));
+        }
+        out.push_str(&self.light_wait());
+        out
+    }
+
+    /// One group per distinct name, sorted. `key` picks the field to split on.
+    fn grouped(&self, key: fn(&Job) -> &str) -> Vec<(String, Group)> {
+        let mut names: Vec<&str> = self.jobs.iter().map(key).collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+            .into_iter()
+            .map(|name| {
+                let group = Group::of(self.jobs.iter().filter(|job| key(job) == name));
+                (name.to_string(), group)
+            })
+            .collect()
+    }
+
+    /// A Light job that waited over a second means placement or the pool is
+    /// wrong: a probe must never queue behind a transcode (ADR 0032).
+    fn light_wait(&self) -> String {
+        let light = self
+            .jobs
+            .iter()
+            .filter(|job| job.class == crate::Class::Light.name())
+            .count();
+        if light == 0 {
+            return "light wait  none\n".to_string();
+        }
+        let (waited, slowest) = self.light_waits();
+        let slowest = if waited == 0 {
+            "-".to_string()
+        } else {
+            human(slowest)
+        };
+        format!("light wait  {waited} of {light} light jobs waited over 1 s, slowest {slowest}\n")
+    }
+
+    /// Light jobs that waited over a second, and the longest of those. The
+    /// count must stay at zero, so a dashboard can alert on it.
+    fn light_waits(&self) -> (usize, u64) {
+        const LIMIT_US: u64 = 1_000_000;
+        let mut waited = 0;
+        let mut slowest = 0;
+        for job in &self.jobs {
+            if job.class == crate::Class::Light.name() && job.dispatch_us > LIMIT_US {
+                waited += 1;
+                slowest = slowest.max(job.dispatch_us);
+            }
+        }
+        (waited, slowest)
+    }
+
+    fn groups_json(&self, key: fn(&Job) -> &str) -> serde_json::Value {
+        let mut rows = serde_json::Map::new();
+        for (name, group) in self.grouped(key) {
+            rows.insert(name, group.json());
+        }
+        serde_json::Value::Object(rows)
     }
 
     fn line(&self, label: &str, samples: &[u64]) -> String {
@@ -274,8 +441,165 @@ impl Summary {
             "fps_x10": stats(&self.fps),
             "content": self.content,
             "work": self.work,
+            "class": self.classes,
+            "kinds": self.groups_json(kind_of),
+            "classes": self.groups_json(class_of),
+            "light_wait_over_1s": self.light_waits().0,
+            "sizes": self.sizes_json(),
+            "parked_us": self.parked_json(),
         });
         value.to_string()
+    }
+
+    /// One row per host and class: the cap the next dispatch will use, the
+    /// sample count and the p05 behind it.
+    fn sizes_json(&self) -> serde_json::Value {
+        let mut hosts = serde_json::Map::new();
+        for (host, sizes) in &self.sizes {
+            let rows: Vec<serde_json::Value> = sizes
+                .iter()
+                .map(|size| {
+                    serde_json::json!({
+                        "class": size.key.as_ref().map_or_else(|| "heavy".to_string(), |key| key.label()),
+                        "cap": size.cap,
+                        "samples": size.samples,
+                        "p05": size.p05,
+                    })
+                })
+                .collect();
+            hosts.insert(host.clone(), serde_json::Value::Array(rows));
+        }
+        serde_json::Value::Object(hosts)
+    }
+
+    /// Parked microseconds per job, so a dashboard reads the pause of one
+    /// stream instead of a total nobody can attribute.
+    fn parked_json(&self) -> serde_json::Value {
+        let mut rows = serde_json::Map::new();
+        for job in &self.jobs {
+            if job.parked_us > 0 {
+                rows.insert(job.id.clone(), serde_json::Value::from(job.parked_us));
+            }
+        }
+        serde_json::Value::Object(rows)
+    }
+}
+
+/// The cap a host's journal gives each content class. Same rules the
+/// dispatcher applies at startup, on the same tail, so the report and the
+/// placement cannot disagree.
+fn sizes(records: &[crate::state::Record]) -> BTreeMap<String, Vec<crate::sizing::Size>> {
+    let cpus = crate::config::cpus();
+    crate::sizing::samples(records)
+        .iter()
+        .map(|(host, samples)| {
+            let mut sizes: Vec<crate::sizing::Size> = crate::sizing::classes(samples)
+                .iter()
+                .filter_map(|key| crate::sizing::size_class(samples, key, cpus))
+                .collect();
+            if sizes.is_empty() {
+                sizes.push(crate::sizing::Size::none());
+            }
+            (host.clone(), sizes)
+        })
+        .collect()
+}
+
+/// Percentiles for a set of jobs: one row of the breakdown, and one JSON
+/// object.
+#[derive(Debug, Default, Clone)]
+struct Group {
+    n: usize,
+    dispatch_p50: u64,
+    dispatch_p95: u64,
+    duration_p50: Option<u64>,
+    duration_p95: Option<u64>,
+    speed_p05: Option<u64>,
+    speed_p50: Option<u64>,
+}
+
+impl Group {
+    fn of<'a>(jobs: impl IntoIterator<Item = &'a Job>) -> Group {
+        let mut dispatch = Vec::new();
+        let mut duration = Vec::new();
+        let mut speed = Vec::new();
+        let mut n = 0;
+        for job in jobs {
+            n += 1;
+            dispatch.push(job.dispatch_us);
+            if let Some(us) = job.duration_us {
+                duration.push(us);
+            }
+            if let Some(x) = job.stats.speed {
+                speed.push((x * 1000.0).round().max(0.0) as u64);
+            }
+        }
+        dispatch.sort_unstable();
+        duration.sort_unstable();
+        speed.sort_unstable();
+        let rank = |sorted: &[u64], fraction: f64| -> Option<u64> {
+            if sorted.is_empty() {
+                None
+            } else {
+                Some(percentile(sorted, fraction))
+            }
+        };
+        Group {
+            n,
+            dispatch_p50: percentile(&dispatch, 0.50),
+            dispatch_p95: percentile(&dispatch, 0.95),
+            duration_p50: rank(&duration, 0.50),
+            duration_p95: rank(&duration, 0.95),
+            speed_p05: rank(&speed, 0.05),
+            speed_p50: rank(&speed, 0.50),
+        }
+    }
+
+    fn line(&self, label: &str, name: &str) -> String {
+        format!(
+            "{label:<9} {name:<10} n={:<5} dispatch p50 {:<9} p95 {:<9} duration p50 {:<9} p95 {:<9} speed p05 {:<7} p50 {}\n",
+            self.n,
+            human(self.dispatch_p50),
+            human(self.dispatch_p95),
+            dash(self.duration_p50.map(human)),
+            dash(self.duration_p95.map(human)),
+            dash(self.speed_p05.map(speed)),
+            dash(self.speed_p50.map(speed)),
+        )
+    }
+
+    /// A percentile with no sample is null, not zero: a zero would read as a
+    /// real measurement of no time.
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "n": self.n,
+            "dispatch_p50_us": self.dispatch_p50,
+            "dispatch_p95_us": self.dispatch_p95,
+            "duration_p50_us": self.duration_p50,
+            "duration_p95_us": self.duration_p95,
+            "speed_p05": self.speed_p05,
+            "speed_p50": self.speed_p50,
+        })
+    }
+}
+
+fn kind_of(job: &Job) -> &str {
+    &job.kind
+}
+
+fn class_of(job: &Job) -> &str {
+    &job.class
+}
+
+fn dash(value: Option<String>) -> String {
+    value.unwrap_or_else(|| "-".to_string())
+}
+
+fn unknown_if_empty(name: &str) -> String {
+    if name.is_empty() {
+        "unknown".to_string()
+    } else {
+        name.to_string()
     }
 }
 
@@ -416,6 +740,7 @@ mod tests {
         let report = summary.report();
         assert!(report.contains("dispatch"), "{report}");
         assert!(report.contains("host worker"), "{report}");
+        assert!(report.contains("class     heavy 2"), "{report}");
     }
 
     #[test]
@@ -473,12 +798,20 @@ mod tests {
     }
 
     fn started(job: &str, host: &str, elapsed_us: u64) -> Event {
+        job_started(job, host, elapsed_us, "heavy", "transcode")
+    }
+
+    fn job_started(job: &str, host: &str, elapsed_us: u64, class: &str, kind: &str) -> Event {
         Event::Started {
             job: job.into(),
             host: host.into(),
             elapsed_us,
             program: "ffmpeg".into(),
             in_flight: 1,
+            class: class.into(),
+            pool: class.into(),
+            job_kind: kind.into(),
+            input: "/media/ep.mkv".into(),
         }
     }
 
@@ -536,6 +869,40 @@ mod tests {
             summary.json().contains("\"p50\":1240"),
             "{}",
             summary.json()
+        );
+    }
+
+    /// One row per kind, one per class, and the light job that waited anyway.
+    #[test]
+    fn the_breakdown_splits_by_kind_and_class() {
+        let records = vec![
+            record(1, 0, job_started("t", "worker", 100, "light", "trickplay")),
+            record(
+                2,
+                10,
+                job_started("th", "worker", 2_000_000, "light", "thumbnail"),
+            ),
+            record(3, 20, job_started("x", "worker", 300, "heavy", "transcode")),
+        ];
+        let summary = Summary::from_records("journal".into(), &records);
+        let report = summary.report();
+        for kind in ["trickplay", "thumbnail", "transcode"] {
+            assert!(report.contains(&format!("kind      {kind}")), "{report}");
+        }
+        assert!(report.contains("class     light      n=2"), "{report}");
+        assert!(report.contains("class     heavy      n=1"), "{report}");
+        assert!(
+            report.contains("light wait  1 of 2 light jobs waited over 1 s, slowest 2.0 s"),
+            "{report}"
+        );
+
+        let json: serde_json::Value = serde_json::from_str(&summary.json()).expect("json");
+        assert_eq!(json["kinds"]["trickplay"]["n"], 1, "{json}");
+        assert_eq!(json["classes"]["light"]["n"], 2, "{json}");
+        assert_eq!(json["light_wait_over_1s"], 1, "{json}");
+        assert!(
+            json["kinds"]["transcode"]["duration_p50_us"].is_null(),
+            "{json}"
         );
     }
 }

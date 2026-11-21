@@ -101,6 +101,29 @@ pub enum Event {
         /// included. Compare with the host's `concurrency` to read saturation.
         #[serde(default)]
         in_flight: usize,
+        /// `light` or `heavy`, read from the program and the arguments (see
+        /// `Class`). A Light job is a probe, a thumbnail or a trickplay scan.
+        /// Defaulted for journals written before the split.
+        #[serde(default)]
+        class: String,
+        /// The slot pool the job took: `heavy` or `light`. Equal to `class`
+        /// today, and recorded apart so a dashboard reads where the job was
+        /// placed instead of inferring it.
+        #[serde(default)]
+        pool: String,
+        /// What the job does, read from the program and the arguments (see
+        /// `Kind`): `trickplay`, `transcode`, and the rest. Defaulted for
+        /// journals written before it existed.
+        ///
+        /// `job_kind` and not `kind`: the event's own tag already owns that
+        /// name, and renaming the tag would stop old journals from replaying.
+        #[serde(default)]
+        job_kind: String,
+        /// The input path with the `file:` scheme stripped, and empty when the
+        /// job has no `-i`. One path, never the whole argument list.
+        /// Defaulted for journals written before it existed.
+        #[serde(default)]
+        input: String,
     },
     Finished {
         job: String,
@@ -129,6 +152,39 @@ pub enum Event {
     },
     /// A job whose process disappeared without a Finished event.
     Reaped {
+        job: String,
+    },
+    /// The heavy cap a process resolved at startup, with the numbers behind
+    /// it, so a change has a reason in the journal. An audit line, not state:
+    /// the next process reads the same tail and computes the same cap, and
+    /// nothing reads this event back (ADR 0033). Defaulted fields keep a
+    /// partial line replayable.
+    Sized {
+        host: String,
+        /// The content class the cap is for, see `sizing::Key`.
+        #[serde(default)]
+        class: String,
+        #[serde(default)]
+        cap: usize,
+        /// Finishes the percentile was read from.
+        #[serde(default)]
+        samples: usize,
+        /// 5th percentile of the solo speeds, in times realtime.
+        #[serde(default)]
+        p05: Option<f64>,
+        /// The cap before the hysteresis move, so a change has a reason.
+        #[serde(default)]
+        previous: usize,
+    },
+    /// A job that stopped using the CPU and stopped writing: Jellyfin paused
+    /// the stream, so the job is waiting on a viewer, not encoding. It keeps
+    /// its slot, and placement discounts it.
+    Parked {
+        job: String,
+    },
+    /// The same job took the CPU again, or wrote again, without a new start.
+    /// It needs no new slot.
+    Resumed {
         job: String,
     },
 }
@@ -339,6 +395,10 @@ fn apply(event: &Event, live: &mut Live) {
         // The host verdict lives in the lock directory. These events are for
         // `rrffmpeg-stats` only.
         Event::HostDown { .. } | Event::HostUp { .. } => {}
+        // A parked job is still running and keeps its active row: it owns a
+        // slot, and it will print into the same Finished line when it ends.
+        // The cap line is an audit record of one process's startup.
+        Event::Parked { .. } | Event::Resumed { .. } | Event::Sized { .. } => {}
     }
 }
 
@@ -478,6 +538,40 @@ fn tail_seq(path: &Path) -> u64 {
         .find_map(|line| serde_json::from_str::<Record>(line).ok())
         .map(|record| record.seq)
         .unwrap_or(0)
+}
+
+/// The last records of the active journal, oldest first, at most the last
+/// 64 KB of the file.
+///
+/// The sizing reads this instead of the whole journal: one startup pays for
+/// 64 KB, not for a week of history. A missing file is no records, which
+/// sizes to one job. A seek that lands inside a line leaves a fragment that
+/// does not parse, and it is dropped like any other bad line.
+pub fn tail_records(dir: &Path) -> Vec<Record> {
+    const TAIL: u64 = 64 * 1024;
+    let path = dir.join(JOURNAL_NAME);
+    let Ok(mut file) = File::open(&path) else {
+        return Vec::new();
+    };
+    let Ok(len) = file.metadata().map(|m| m.len()) else {
+        return Vec::new();
+    };
+    let start = len.saturating_sub(TAIL);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = Vec::new();
+    if (&mut file).take(TAIL).read_to_end(&mut buf).is_err() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines = text.lines();
+    if start > 0 {
+        lines.next();
+    }
+    lines
+        .filter_map(|line| serde_json::from_str::<Record>(line).ok())
+        .collect()
 }
 
 /// Rebuild live state from one file. A bad line is reported and skipped: a
@@ -669,6 +763,10 @@ mod tests {
             elapsed_us: 0,
             program: "ffmpeg".into(),
             in_flight: 1,
+            class: "heavy".into(),
+            pool: "heavy".into(),
+            job_kind: "transcode".into(),
+            input: "/media/ep.mkv".into(),
         }
     }
 
@@ -688,6 +786,30 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str::<Record>(&line.unwrap()).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn the_tail_reader_takes_what_parses_and_nothing_without_a_journal() {
+        let dir = temp_dir("tail-records");
+        assert!(tail_records(&dir).is_empty(), "no journal, no samples");
+
+        {
+            let journal = Journal::open(&dir).unwrap();
+            journal.append(started("a", "worker"));
+            journal.append(started("b", "worker"));
+        }
+        let records = tail_records(&dir);
+        assert_eq!(records.len(), 2);
+        assert!(matches!(&records[1].ev, Event::Started { job, .. } if job == "b"));
+
+        // A crash can leave half a line at the end of the file; the reader
+        // drops the fragment and keeps everything it can parse.
+        let path = dir.join(JOURNAL_NAME);
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str("{\"seq\":9,\"ts\":9,\"ev\":{\"kind\":\"star");
+        std::fs::write(&path, text).unwrap();
+        assert_eq!(tail_records(&dir).len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -852,8 +974,8 @@ mod tests {
         assert_eq!(journal.active_on("worker"), 2);
     }
 
-    /// A journal written before `elapsed_us` existed keeps replaying, without
-    /// a warning per line at every start.
+    /// A journal written before `elapsed_us`, `kind` and `input` existed keeps
+    /// replaying, without a warning per line at every start.
     #[test]
     fn a_record_without_elapsed_us_still_counts() {
         let dir = temp_dir("legacy");
@@ -862,6 +984,19 @@ mod tests {
 
         let journal = Journal::open(&dir).unwrap();
         assert_eq!(journal.active_on("worker"), 1);
+
+        // The missing fields default to empty, not to a parse failure.
+        let record = &super::records(&dir).unwrap()[0];
+        match &record.ev {
+            Event::Started {
+                job_kind, input, ..
+            } => {
+                assert!(job_kind.is_empty());
+                assert!(input.is_empty());
+            }
+            other => panic!("expected a Started event, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

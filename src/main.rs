@@ -7,10 +7,12 @@
 
 use rrffmpeg::janitor::Janitor;
 use rrffmpeg::locks::LockDir;
-use rrffmpeg::scheduler::Scheduler;
+use rrffmpeg::scheduler::{Lease, Scheduler};
 use rrffmpeg::state::{Event, Journal};
 use rrffmpeg::transport::{Local, Persist, Router, Ssh, Transport};
-use rrffmpeg::{Error, Host, Job, Program, Result, capabilities, config::Config, jellyfin, paths};
+use rrffmpeg::{
+    Class, Error, Host, Job, Program, Result, capabilities, config::Config, jellyfin, paths,
+};
 use std::ffi::OsString;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
@@ -83,6 +85,12 @@ fn run() -> Result<i32> {
     }
 
     let journal = Arc::new(Journal::open(&config.state_dir)?);
+    // Resolve the caps once, from each host's own journal, before anything
+    // reads them: a cap that moved under a running job would be a lie.
+    let (config, sized) = config.sized();
+    for event in sized {
+        journal.append(event);
+    }
     let scheduler = Arc::new(
         Scheduler::new(
             config.hosts.clone(),
@@ -95,7 +103,8 @@ fn run() -> Result<i32> {
         ssh: ssh_transport(&config)?,
         agent,
         local: if config.hosts.iter().any(|host| host.local) {
-            Some(local_transport(&config)?)
+            // Local jobs report a pause, so placement can discount them.
+            Some(local_transport(&config)?.parking(journal.clone(), &config.state_dir))
         } else {
             None
         },
@@ -128,21 +137,23 @@ fn run() -> Result<i32> {
     ) {
         Dispatch::Ran(code) => Ok(code),
         Dispatch::NoSlot => {
+            // A refused job names what ran out: a Light job never waited
+            // `queue_wait_secs`, so quoting that number would mislead.
+            let why = if job.class() == Class::Light {
+                "no free light slot".to_string()
+            } else {
+                format!("no worker slot after {}s", config.queue_wait_secs)
+            };
             // A probe is cheap and Jellyfin needs it for direct-play, so only
             // an ffmpeg job is refused when the fallback is forbidden.
             if !config.fallback_local && program == Program::Ffmpeg {
                 rrffmpeg::log_at!(
                     rrffmpeg::log::Level::Error,
-                    "no worker slot after {}s and fallback_local is false: not encoding on this host",
-                    config.queue_wait_secs
+                    "{why} and fallback_local is false: not encoding on this host"
                 );
                 return Ok(1);
             }
-            rrffmpeg::log_at!(
-                rrffmpeg::log::Level::Warn,
-                "no worker slot after {}s, running locally",
-                config.queue_wait_secs
-            );
+            rrffmpeg::log_at!(rrffmpeg::log::Level::Warn, "{why}, running locally");
             run_local(&config, program, &args, stderr_as_stdout)
         }
         Dispatch::Failed(e) => Err(e),
@@ -175,18 +186,22 @@ fn dispatch(
     let mut attempt = job.clone();
     let mut failed: Option<Error> = None;
     loop {
-        let lease = match scheduler.acquire_blocking(&attempt, wait) {
-            Some(lease) => lease,
+        let class = attempt.class();
+        let (host, lease) = match place(scheduler, &attempt, wait) {
+            Placed::Slot(lease) => (lease.host.clone(), Some(lease)),
+            // No light slot, so the job runs on this machine instead. The few
+            // frames it reads cost less than the wait.
+            Placed::Local(host) => (host, None),
             // A failed attempt that cannot be retried keeps its own error.
             // Falling back to local here would hide a worker that answered.
-            None => return failed.map_or(Dispatch::NoSlot, Dispatch::Failed),
+            Placed::None => return failed.map_or(Dispatch::NoSlot, Dispatch::Failed),
         };
 
         let mapped = Job {
             args: attempt
                 .args
                 .iter()
-                .map(|a| paths::to_worker(&lease.host, a))
+                .map(|a| paths::to_worker(&host, a))
                 .collect(),
             ..attempt.clone()
         };
@@ -194,21 +209,26 @@ fn dispatch(
         // Queued, not fsync'd: the transcode starts without waiting for the disk.
         journal.append(Event::Started {
             job: mapped.id.clone(),
-            host: lease.host.name.clone(),
+            host: host.name.clone(),
             elapsed_us: start.elapsed().as_micros() as u64,
             program: mapped.program.binary().to_string(),
-            // The lease already holds this job's slot, so the flock count is
-            // exact and needs no journal replay on the dispatch path.
-            in_flight: scheduler.running(&lease.host),
+            // A lease already holds this job's slot, so the flock count is
+            // exact and needs no journal replay on the dispatch path. A Light
+            // job that ran here holds none, and reads the pool as it stands.
+            in_flight: scheduler.running(&host, class),
+            class: class.name().to_string(),
+            pool: class.name().to_string(),
+            job_kind: mapped.kind().name().to_string(),
+            input: mapped.input(),
         });
 
         let started = std::time::Instant::now();
-        match transport.run(&lease.host, &mapped, stderr_as_stdout) {
+        match transport.run(&host, &mapped, stderr_as_stdout) {
             Ok(code) => {
                 journal.append(Event::Finished {
                     job: mapped.id.clone(),
                     code,
-                    host: lease.host.name.clone(),
+                    host: host.name.clone(),
                     dur_us: started.elapsed().as_micros() as u64,
                     // Taken here, once, so a retry below starts with an empty
                     // slot instead of inheriting the failed attempt's lines.
@@ -220,9 +240,9 @@ fn dispatch(
             }
             Err(e) => {
                 journal.append(Event::HostDown {
-                    host: lease.host.name.clone(),
+                    host: host.name.clone(),
                 });
-                scheduler.mark_down(&lease.host.name);
+                scheduler.mark_down(&host.name);
                 drop(lease);
                 if can_retry && failed.is_none() && matches!(e, Error::NotStarted(_)) {
                     failed = Some(e);
@@ -237,6 +257,40 @@ fn dispatch(
                 return Dispatch::Failed(e);
             }
         }
+    }
+}
+
+/// How one placement attempt ended.
+enum Placed {
+    Slot(Lease),
+    /// The light pool is full on this machine, so the job runs here without a
+    /// slot.
+    Local(Host),
+    None,
+}
+
+/// Take a slot in the job's pool.
+///
+/// A Heavy job waits up to `wait` for a slot. A Light job never waits that
+/// long: it takes a free light slot at once, runs on this machine when its own
+/// light pool is full, and otherwise gives a remote light slot a few seconds
+/// (ADR 0032).
+fn place(scheduler: &Scheduler, job: &Job, wait: Duration) -> Placed {
+    if job.class() != Class::Light {
+        return match scheduler.acquire_blocking(job, wait) {
+            Some(lease) => Placed::Slot(lease),
+            None => Placed::None,
+        };
+    }
+    if let Some(lease) = scheduler.acquire(job) {
+        return Placed::Slot(lease);
+    }
+    if let Some(host) = scheduler.local_host(job) {
+        return Placed::Local(host);
+    }
+    match scheduler.acquire_blocking(job, wait.min(rrffmpeg::scheduler::LIGHT_WAIT)) {
+        Some(lease) => Placed::Slot(lease),
+        None => Placed::None,
     }
 }
 
@@ -610,6 +664,7 @@ mod tests {
         rrffmpeg::Host {
             name: name.into(),
             concurrency: 1,
+            light_concurrency: 2,
             capabilities: Vec::new(),
             local: false,
             ffmpeg_bin: None,
@@ -706,19 +761,15 @@ mod tests {
 
     #[test]
     fn a_half_configured_agent_is_an_error() {
-        let config = Config {
-            agent_token: Some("secret".into()),
-            ..Config::default()
-        };
+        let mut config = Config::default();
+        config.agent_token = Some("secret".into());
         assert!(matches!(agent_client(&config), Err(Error::Config(_))));
     }
 
     #[test]
     fn capabilities_refuses_a_host_that_matches_nothing() {
-        let config = Config {
-            hosts: vec![host("worker")],
-            ..Config::default()
-        };
+        let mut config = Config::default();
+        config.hosts = vec![host("worker")];
         let err = capabilities_command(&config, &args(&["other"])).unwrap_err();
         assert!(matches!(err, Error::Config(m) if m.contains("no host matches")));
     }
@@ -727,10 +778,8 @@ mod tests {
     fn an_explicit_socket_directory_wins_over_the_defaults() {
         let root = scratch("socket-dir");
         let socket = root.join("socket");
-        let config = Config {
-            ssh_socket_dir: Some(socket.clone()),
-            ..Config::default()
-        };
+        let mut config = Config::default();
+        config.ssh_socket_dir = Some(socket.clone());
         assert_eq!(ssh_socket_dir(&config).unwrap(), socket);
         let _ = std::fs::remove_dir_all(&root);
     }

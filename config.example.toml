@@ -62,7 +62,21 @@ down_ttl_secs = 60
 
 [[hosts]]
 name = "worker"
+# Slots for transcodes on this host. A number, or "auto" to size it from this
+# host's own journal when the process starts (ADR 0033): the 5th percentile of
+# its solo speeds for the content class, divided by 1.3 and clamped to
+# [1, min(4, cpus / 2)]. An absent key means "auto", which is 1 on a host
+# without `local = true` and a measured cap on a local one. 0 and "unlimited"
+# are refused: a pool that admits more than the GPU serves lands on a live
+# viewer's stream.
 concurrency = 2
+# Slots for Light jobs: `ffprobe`, a single-frame thumbnail, an MJPEG sprite,
+# a `-skip_frame nokey` trickplay scan. They never take a `concurrency` slot,
+# so an extraction cannot queue behind a transcode. On a `local = true` host a
+# Light job whose light slots are all busy runs on the client without a slot,
+# because Jellyfin kills an extraction that produces nothing for 20 s.
+# "auto" gives min(4, max(2, cpus / 2)); an absent key keeps 2 here.
+light_concurrency = 2
 # What this worker proved it can do. Run `rrffmpeg capabilities worker` on the
 # client to print the exact line, one frame per token. An empty list accepts
 # any job; every token a job needs must be listed here.

@@ -18,6 +18,7 @@ fn worker() -> Host {
     Host {
         name: "worker".into(),
         concurrency: 1,
+        light_concurrency: 2,
         capabilities: Vec::new(),
         local: false,
         ffmpeg_bin: None,

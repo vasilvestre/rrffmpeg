@@ -119,7 +119,13 @@ fn active(records: &[Record]) -> HashSet<String> {
             Event::Finished { job, .. } | Event::Reaped { job } => {
                 jobs.remove(job);
             }
-            Event::HostDown { .. } | Event::HostUp { .. } => {}
+            // Sizing and parking lines describe a job, they never add or
+            // remove one.
+            Event::HostDown { .. }
+            | Event::HostUp { .. }
+            | Event::Sized { .. }
+            | Event::Parked { .. }
+            | Event::Resumed { .. } => {}
         }
     }
     jobs

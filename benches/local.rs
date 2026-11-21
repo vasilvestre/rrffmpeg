@@ -78,6 +78,10 @@ fn journal_open_write_close(c: &mut Criterion) {
                     elapsed_us: 0,
                     program: "ffmpeg".into(),
                     in_flight: 1,
+                    class: "heavy".to_string(),
+                    pool: "heavy".to_string(),
+                    job_kind: "transcode".to_string(),
+                    input: "/media/ep.mkv".to_string(),
                 });
                 journal.append(Event::Finished {
                     job: "bench".into(),

@@ -29,6 +29,7 @@ fn worker() -> Host {
     Host {
         name: "worker".into(),
         concurrency: 1,
+        light_concurrency: 2,
         capabilities: Vec::new(),
         local: false,
         ffmpeg_bin: None,
@@ -65,8 +66,13 @@ fn a_busy_worker_falls_back_or_refuses() {
     // client, sees it as busy: flock is per open file description.
     let locks = LockDir::new(&state);
     let _hold = locks
-        .try_acquire(&worker(), "holder")
+        .try_acquire(&worker(), "holder", rrffmpeg::Class::Heavy)
         .expect("the only slot is free");
+    // The light pool is separate, so the probe case only counts as "no slot"
+    // once it is held too.
+    let _light = locks
+        .try_acquire(&worker(), "probe", rrffmpeg::Class::Light)
+        .expect("the only light slot is free");
 
     // The local stand-in writes a marker, so a fallback is visible.
     let marker = root.join("ran");
@@ -82,7 +88,7 @@ fn a_busy_worker_falls_back_or_refuses() {
     fs::write(
         &allowed,
         format!(
-            "state_dir = \"{}\"\nqueue_wait_secs = 0\nfallback_local = true\nssh_persist_secs = 0\n\n[[hosts]]\nname = \"worker\"\n",
+            "state_dir = \"{}\"\nqueue_wait_secs = 0\nfallback_local = true\nssh_persist_secs = 0\n\n[[hosts]]\nname = \"worker\"\nlight_concurrency = 1\n",
             state.display()
         ),
     )
@@ -92,7 +98,7 @@ fn a_busy_worker_falls_back_or_refuses() {
     fs::write(
         &denied,
         format!(
-            "state_dir = \"{}\"\nqueue_wait_secs = 0\nfallback_local = false\nssh_persist_secs = 0\n\n[[hosts]]\nname = \"worker\"\n",
+            "state_dir = \"{}\"\nqueue_wait_secs = 0\nfallback_local = false\nssh_persist_secs = 0\n\n[[hosts]]\nname = \"worker\"\nlight_concurrency = 1\n",
             state.display()
         ),
     )

@@ -1005,6 +1005,7 @@ mod tests {
             local: false,
             name: "worker".into(),
             concurrency: 1,
+            light_concurrency: 2,
             capabilities: vec![],
             ffmpeg_bin: Some(bin.into()),
             ffprobe_bin: Some(bin.into()),
