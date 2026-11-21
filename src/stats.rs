@@ -313,15 +313,10 @@ impl Summary {
         // with `n 0`, and a host that never measured anything used to show no
         // `size` row at all.
         for ((host, class), (cap, samples, p05)) in &self.recorded {
-            let measured = self.sizes.get(host).is_some_and(|sizes| {
-                sizes.iter().any(|size| {
-                    size.key
-                        .as_ref()
-                        .map_or_else(|| "heavy".to_string(), |key| key.label())
-                        == *class
-                })
-            });
-            if measured {
+            // A host with a live sample already has a live row; the recorded
+            // decision would only repeat it, or contradict it with an older
+            // cap.
+            if self.sizes.contains_key(host) {
                 continue;
             }
             out.push_str(&format!(
@@ -853,6 +848,26 @@ mod tests {
         assert!(report.contains("class heavy"), "{report}");
         assert!(report.contains("cap 1"), "{report}");
         assert!(report.contains("n 0"), "{report}");
+    }
+
+    /// A recorded decision that carried a percentile still prints it: the row
+    /// must not lose a number the journal gave it.
+    #[test]
+    fn a_recorded_line_prints_its_p05() {
+        let records = vec![record(
+            1,
+            0,
+            Event::Sized {
+                host: "uhd630".into(),
+                class: "heavy".into(),
+                cap: 2,
+                samples: 9,
+                p05: Some(1.42),
+                previous: 1,
+            },
+        )];
+        let report = Summary::from_records("journal".into(), &records).report();
+        assert!(report.contains("p05 1.42x"), "{report}");
     }
 
     fn record(seq: u64, ts: u64, ev: Event) -> crate::state::Record {
