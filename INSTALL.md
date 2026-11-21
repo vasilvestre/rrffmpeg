@@ -127,7 +127,7 @@ fallback_local = false
 
 [[hosts]]
 name = "worker"
-concurrency = 2
+concurrency = "auto"
 capabilities = ["vaapi"]
 ssh_args = ["-i", "/home/alice/.ssh/worker"]
 
@@ -145,7 +145,9 @@ to = "/home/bob/transcode"
 ```
 
 - `name` is the SSH destination: `worker`, `user@worker`, or an address.
-- `concurrency` is the number of jobs the worker accepts at once.
+- `concurrency` is the number of jobs the worker accepts at once, or `"auto"`
+  to size it from the worker's own journal. `"auto"` starts at 1 and climbs one
+  job per ten finishes at 1.3x realtime or better; a number pins it.
 - `capabilities` lists the accelerators the worker really has. Empty accepts any
   job, which is wrong for a GPU-less worker.
 - `ssh_args` holds the key and any `-o` option. A top-level `ssh_args` applies

@@ -7,8 +7,12 @@ Each entry points at raw Markdown so a reader gets plain text.
 
 ## Docs
 
-- [README](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/README.md): what the project is, why it exists, the measured defects it fixes, install and configuration.
+- [README](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/README.md): the pitch, install, the minimal config, and the index of documents.
 - [INSTALL](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/INSTALL.md): the full install on a client and a worker, the agent daemon, the disk and GPU checks, and the section written for an AI agent.
+- [Configuration](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/configuration.md): the agent transport, the table that picks a mode, the nine rules for a configured worker, capabilities, and the audit of Jellyfin's `encoding.xml`.
+- [Why rrffmpeg exists](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/why.md): the alternatives, the measured defects of rffmpeg, how rrffmpeg answers each one, and the evidence.
+- [Status](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/status.md): what works in v1, what is next, and the known risks.
+- [Operations](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/operations.md): `rrffmpeg-stats` and how to read the journal report, plus the log levels.
 - [Project page](https://vasilvestre.github.io/rrffmpeg/): the same pitch as HTML, plus the current status section.
 - [Measured dispatch latency](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/latency.md): how much the dispatcher adds to a transcode start, with the commands to repeat the measurement.
 - [rffmpeg against rrffmpeg](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/compare-rffmpeg.md): the same job through both dispatchers, on one controlled box and on the production Jellyfin host and its GPU worker, with the breakdown of rffmpeg's cost and the configs to repeat it.
@@ -60,7 +64,8 @@ Each entry points at raw Markdown so a reader gets plain text.
 - [0029 A local host takes part in placement](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0029-a-local-host-takes-part-in-placement.md): why `local = true` on a host runs its jobs on the client and lets the scheduler choose between it and a worker.
 - [0030 A host declares what it can read](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0030-a-host-declares-what-it-can-read.md): why placement skips a host whose declared roots cover no input, and why an empty list keeps the old behaviour.
 - [0032 Two pools per host](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0032-two-pools-for-jobs.md): why a probe, a thumbnail and a trickplay scan get their own pool with `light_concurrency`, why a Light job overflows to the local binary instead of waiting, and why the local child is killed with `SIGKILL` when its wrapper dies.
-- [0033 Pool caps from measured speed](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0033-size-the-pools-from-measured-speed.md): why `concurrency = "auto"` sizes a host from its own journal, how the 5th percentile of solo speeds becomes a cap, why the hysteresis lives in the journal tail instead of a counter file, and why a throttled job is parked instead of counted as slow.
+- [0033 Pool caps from measured speed](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0033-size-the-pools-from-measured-speed.md): why `concurrency = "auto"` sizes a host from its own journal, how the 5th percentile of solo speeds becomes a cap, why the hysteresis lives in the journal tail instead of a counter file, and why a throttled job is parked instead of counted as slow, amended by 0034.
+- [0034 An absent cap is auto everywhere](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0034-an-absent-cap-is-auto-everywhere.md): why an absent `concurrency` is `"auto"` on a remote worker too, since the journal records the speed that worker reported, and why the cost is a cold start at one job.
 - [0031 Placement is an order](https://raw.githubusercontent.com/vasilvestre/rrffmpeg/main/docs/adr/0031-placement-is-an-order-not-the-file.md): the tie-break order that replaces config order, and why a software encode prefers a host that needs no SSH.
 
 ## Optional

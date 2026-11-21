@@ -1,6 +1,6 @@
 # 0033 Size the pools from measured speed
 
-Status: Accepted
+Status: Accepted, amended by ADR-0034
 
 ## Context
 

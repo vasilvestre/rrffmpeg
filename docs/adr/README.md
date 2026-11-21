@@ -42,6 +42,7 @@ ADR-NNNN` and add the new record.
 | [0030](0030-a-host-declares-what-it-can-read.md) | A host declares the roots it can read, and placement skips one that cannot | Accepted |
 | [0031](0031-placement-is-an-order-not-the-file.md) | Placement is a total order: no-ssh, then `prefer`, then load, then name | Accepted |
 | [0032](0032-two-pools-for-jobs.md) | Two pools per host: Light jobs never take a transcode slot, and a local child dies with its wrapper | Accepted |
-| [0033](0033-size-the-pools-from-measured-speed.md) | The pool caps come from measured speed in the journal, and a throttled job is parked, not slow | Accepted |
+| [0033](0033-size-the-pools-from-measured-speed.md) | The pool caps come from measured speed in the journal, and a throttled job is parked, not slow | Accepted, amended by [0034](0034-an-absent-cap-is-auto-everywhere.md) |
+| [0034](0034-an-absent-cap-is-auto-everywhere.md) | An absent `concurrency` is `"auto"` on every host, workers included | Accepted |
 
 Records dated 2026-11-17 to 2026-11-21.
