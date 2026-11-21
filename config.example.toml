@@ -65,11 +65,11 @@ name = "worker"
 # Slots for transcodes on this host. A number, or "auto" to size it from this
 # host's own journal when the process starts (ADR 0033): the 5th percentile of
 # its solo speeds for the content class, divided by 1.3 and clamped to
-# [1, min(4, cpus / 2)]. An absent key means "auto", which is 1 on a host
-# without `local = true` and a measured cap on a local one. 0 and "unlimited"
-# are refused: a pool that admits more than the GPU serves lands on a live
-# viewer's stream.
-concurrency = 2
+# [1, min(4, cpus / 2)]. An absent key means "auto" on every host, remote ones
+# included (ADR 0034): it starts at 1 and climbs one job per ten finishes at
+# 1.3x or better. 0 and "unlimited" are refused: a pool that admits more than
+# the GPU serves lands on a live viewer's stream.
+concurrency = "auto"
 # Slots for Light jobs: `ffprobe`, a single-frame thumbnail, an MJPEG sprite,
 # a `-skip_frame nokey` trickplay scan. They never take a `concurrency` slot,
 # so an extraction cannot queue behind a transcode. On a `local = true` host a

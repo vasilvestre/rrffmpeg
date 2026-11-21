@@ -483,8 +483,9 @@ impl Config {
     ///
     /// Nothing here writes state: two processes that read the same tail
     /// compute the same caps, so a stored number could only disagree with
-    /// them (ADR 0033). A host that is not `local` is never sized from this
-    /// machine's numbers, which would export a guess across a network.
+    /// them (ADR 0033). An absent key is `"auto"` on every host: the records
+    /// carry the host that ran the job and the speed it reported, so a worker
+    /// is sized from its own measurements (ADR 0034).
     pub fn sized(mut self) -> (Config, Vec<crate::state::Event>) {
         let cpus = cpus();
         let records = crate::state::tail_records(&self.state_dir);
@@ -497,40 +498,36 @@ impl Config {
             let Some(caps) = asked.get(index).copied() else {
                 continue;
             };
-            if caps.heavy.is_none() || caps.light.is_none() {
-                // One line at startup, so an operator sees which host is
-                // sized by a rule instead of by a number they wrote.
-                let what = match (caps.heavy.is_none(), caps.light.is_none()) {
-                    (true, true) => "concurrency and light_concurrency",
-                    (true, false) => "concurrency",
-                    _ => "light_concurrency",
-                };
-                let why = if !host.local {
-                    format!(
-                        "it keeps the default: {} heavy, {} light",
-                        host.concurrency, host.light_concurrency
-                    )
-                } else if caps.heavy.is_none() {
-                    "the pools are sized from its journal".to_string()
+            // One line at startup, so an operator sees which cap came from a
+            // rule instead of from a number they wrote.
+            if caps.heavy.is_none() {
+                crate::log_at!(
+                    crate::log::Level::Warn,
+                    "host {}: concurrency left out, so it is sized from that host's journal",
+                    host.name
+                );
+            }
+            if caps.light.is_none() {
+                let why = if host.local {
+                    "it follows this machine's core count".to_string()
                 } else {
-                    "the light pool follows this machine's core count".to_string()
+                    format!("it keeps {}", host.light_concurrency)
                 };
                 crate::log_at!(
                     crate::log::Level::Warn,
-                    "host {}: {} left out, so {}",
+                    "host {}: light_concurrency left out, so {}",
                     host.name,
-                    what,
                     why
                 );
             }
             if caps.light.is_none() && host.local {
                 host.light_concurrency = crate::sizing::light_cap(cpus);
             }
-            let auto = match caps.heavy {
-                Some(Cap::Auto) => true,
-                Some(Cap::Fixed(_)) => false,
-                None => host.local,
-            };
+            // An absent key is `"auto"` on every host. The samples are read per
+            // host name, and a job records the speed ffmpeg reported on the
+            // machine that ran it, so sizing a worker reads the worker's own
+            // numbers and not this machine's (ADR 0034).
+            let auto = !matches!(caps.heavy, Some(Cap::Fixed(_)));
             if !auto {
                 continue;
             }
@@ -921,23 +918,23 @@ LD_LIBRARY_PATH = "/opt/driver/lib"
     }
 
     #[test]
-    fn a_local_host_left_out_is_sized_from_its_journal_and_a_worker_defaults_to_one() {
-        let lines: Vec<String> = transcode(1, "a", "here", 2.6).into_iter().collect();
+    fn an_absent_cap_sizes_each_host_from_its_own_journal() {
+        let mut lines: Vec<String> = transcode(1, "a", "here", 2.6).into_iter().collect();
+        lines.extend(transcode(3, "b", "worker", 2.6));
         let dir = journal_dir("absent", &lines);
         let text = format!(
-            "state_dir = {:?}\n[[hosts]]\nname = \"here\"\nlocal = true\n\n[[hosts]]\nname = \"worker\"\n",
+            "state_dir = {:?}\n[[hosts]]\nname = \"here\"\nlocal = true\n\n[[hosts]]\nname = \"worker\"\n\n[[hosts]]\nname = \"fresh\"\n",
             dir
         );
         let (cfg, _) = Config::from_toml(&text).unwrap().sized();
+        let want = crate::sizing::ceiling(cpus()).min(2);
+        assert_eq!(cfg.hosts[0].concurrency, want);
         assert_eq!(
-            cfg.hosts[0].concurrency,
-            crate::sizing::ceiling(cpus()).min(2)
-        );
-        assert_eq!(
-            cfg.hosts[1].concurrency, 1,
-            "a remote host is never sized from this machine"
+            cfg.hosts[1].concurrency, want,
+            "a worker is sized from the speed it reported itself"
         );
         assert_eq!(cfg.hosts[1].light_concurrency, 2);
+        assert_eq!(cfg.hosts[2].concurrency, 1, "no sample yet means one job");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
