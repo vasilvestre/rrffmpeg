@@ -86,6 +86,10 @@ pub struct Summary {
     /// sample count and the p05 behind it. Derived from the same tail a
     /// dispatcher reads, never from a stored number (ADR 0033).
     pub sizes: BTreeMap<String, Vec<crate::sizing::Size>>,
+    /// The last `Sized` line of each host and class: the decision the journal
+    /// recorded. Printed even when the tail holds no sample for it, which is
+    /// the cold start an operator needs to see.
+    pub recorded: BTreeMap<(String, String), (usize, usize, Option<f64>)>,
 }
 
 impl Summary {
@@ -175,7 +179,18 @@ impl Summary {
                     }
                 }
                 // An audit line for a startup, not a job.
-                Event::Sized { .. } => {}
+                Event::Sized {
+                    host,
+                    class,
+                    cap,
+                    samples,
+                    p05,
+                    ..
+                } => {
+                    summary
+                        .recorded
+                        .insert((host.clone(), class.clone()), (*cap, *samples, *p05));
+                }
                 Event::HostDown { host } => {
                     summary.hosts.entry(host.clone()).or_default().down += 1;
                 }
@@ -291,6 +306,25 @@ impl Summary {
             out.push_str(&format!(
                 "host {host}  jobs {}  failed {}  down {}  up {}\n",
                 tally.jobs, tally.failed, tally.down, tally.up
+            ));
+        }
+        // A `Sized` line is the decision of record. Print it even when the
+        // tail no longer holds the sample behind it: a cold start writes one
+        // with `n 0`, and a host that never measured anything used to show no
+        // `size` row at all.
+        for ((host, class), (cap, samples, p05)) in &self.recorded {
+            // A host with a live sample already has a live row; the recorded
+            // decision would only repeat it, or contradict it with an older
+            // cap.
+            if self.sizes.contains_key(host) {
+                continue;
+            }
+            out.push_str(&format!(
+                "size      host {host}  class {class:<24} cap {cap}  n {samples:<5} p05 {}\n",
+                match p05 {
+                    Some(p05) => format!("{p05:.2}x"),
+                    None => "none".to_string(),
+                }
             ));
         }
         for (host, sizes) in &self.sizes {
@@ -791,6 +825,49 @@ mod tests {
         assert_eq!(summary.reaped, 1);
         assert_eq!(summary.open, 0);
         assert!(summary.report().contains("orphan_reaped 1"));
+    }
+
+    /// A cold start records one `Sized` and nothing else. The row must still
+    /// appear: there is no sample to recompute a cap from, and the decision
+    /// the journal recorded is the only thing left to show.
+    #[test]
+    fn a_sized_line_alone_prints_a_row() {
+        let records = vec![record(
+            1,
+            0,
+            Event::Sized {
+                host: "uhd630".into(),
+                class: "heavy".into(),
+                cap: 1,
+                samples: 0,
+                p05: None,
+                previous: 0,
+            },
+        )];
+        let report = Summary::from_records("journal".into(), &records).report();
+        assert!(report.contains("class heavy"), "{report}");
+        assert!(report.contains("cap 1"), "{report}");
+        assert!(report.contains("n 0"), "{report}");
+    }
+
+    /// A recorded decision that carried a percentile still prints it: the row
+    /// must not lose a number the journal gave it.
+    #[test]
+    fn a_recorded_line_prints_its_p05() {
+        let records = vec![record(
+            1,
+            0,
+            Event::Sized {
+                host: "uhd630".into(),
+                class: "heavy".into(),
+                cap: 2,
+                samples: 9,
+                p05: Some(1.42),
+                previous: 1,
+            },
+        )];
+        let report = Summary::from_records("journal".into(), &records).report();
+        assert!(report.contains("p05 1.42x"), "{report}");
     }
 
     fn record(seq: u64, ts: u64, ev: Event) -> crate::state::Record {

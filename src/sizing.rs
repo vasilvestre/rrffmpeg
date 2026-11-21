@@ -109,7 +109,8 @@ impl Size {
             cap: 1,
             samples: 0,
             p05: None,
-            previous: 1,
+            // 0, so the caller records the cold start with `samples 0`.
+            previous: 0,
         }
     }
 }

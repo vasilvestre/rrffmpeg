@@ -55,7 +55,7 @@ impl Class {
     ///
     /// Everything else is Heavy: a video encode, a remux, a tonemap transcode.
     pub fn of(program: Program, args: &[OsString]) -> Class {
-        if program == Program::Ffprobe {
+        if program == Program::Ffprobe || lists_and_exits(args) {
             return Class::Light;
         }
         let stills = value_of(args, "-f") == Some("image2");
@@ -74,6 +74,14 @@ fn value_of<'a>(args: &'a [OsString], flag: &str) -> Option<&'a str> {
     let wanted = OsStr::new(flag);
     let at = args.iter().position(|arg| arg.as_os_str() == wanted)?;
     args.get(at + 1)?.to_str()
+}
+
+/// A startup probe: ffmpeg prints a listing and exits, so it must never queue
+/// behind a transcode, where an auto cap of 1 costs the full `queue_wait_secs`.
+/// The `-i` guard keeps a real job that mentions `-h` out of the rule.
+fn lists_and_exits(args: &[OsString]) -> bool {
+    let lists = ["-version", "-encoders", "-hwaccels", "-filters", "-h"];
+    !has_flag(args, "-i") && lists.iter().any(|flag| has_flag(args, flag))
 }
 
 /// One dispatched transcode.
@@ -161,7 +169,7 @@ impl Kind {
     ///   `remux`.
     /// - everything else encodes video: `transcode`.
     pub fn of(program: Program, args: &[OsString]) -> Kind {
-        if program == Program::Ffprobe {
+        if program == Program::Ffprobe || lists_and_exits(args) {
             return Kind::Probe;
         }
         let format = value_of(args, "-f");
@@ -295,6 +303,26 @@ mod tests {
 
     /// The extraction Jellyfin runs for trickplay: key frames only, MJPEG, a
     /// numbered series. It is the reason the split exists.
+    /// Jellyfin probes with `-version` and `-encoders` when it starts: a
+    /// listing, a few milliseconds, no input. They must never wait for a
+    /// transcode, and they are not transcodes in the stats either.
+    #[test]
+    fn a_startup_probe_is_light_and_kind_probe() {
+        for argv in [
+            &["-version"][..],
+            &["-encoders"],
+            &["-hwaccels"],
+            &["-filters"],
+            &["-h", "encoder=h264_vaapi"],
+        ] {
+            assert_eq!(class(argv), Class::Light, "{argv:?}");
+            let args: Vec<OsString> = argv.iter().map(OsString::from).collect();
+            assert_eq!(Kind::of(Program::Ffmpeg, &args), Kind::Probe, "{argv:?}");
+        }
+        // A job that carries an input is never a listing, whatever else it says.
+        assert_eq!(class(&["-h", "1", "-i", "file:/m/x.mkv"]), Class::Heavy);
+    }
+
     #[test]
     fn a_trickplay_scan_is_light() {
         assert_eq!(
