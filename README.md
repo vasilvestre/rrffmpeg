@@ -125,8 +125,9 @@ Ship the smallest thing that is strictly better than rffmpeg. State today:
   host-down verdict is shared with an expiry.
 - [x] Two pools per host: `concurrency` for transcodes, `light_concurrency`
   (default 2) for the work Jellyfin needs to finish in seconds, which is
-  `ffprobe`, a single thumbnail, an MJPEG sprite and a `-skip_frame nokey`
-  trickplay scan. A Light job never waits behind a transcode, and when the
+  `ffprobe`, a single thumbnail, an MJPEG sprite, a `-skip_frame nokey`
+  trickplay scan and a startup listing (`-version`, `-encoders`, `-hwaccels`,
+  `-filters`, `-h`). A Light job never waits behind a transcode, and when the
   light pool is full on a `local = true` host it runs on the client at once
   instead of waiting. ADR 0032.
 - [x] Caps sized from the journal. `concurrency = "auto"` (and an absent key
@@ -437,6 +438,26 @@ host worker  jobs 13  failed 0  down 0  up 0
 worker: config, the journal replay and the slot file. The transport, the daemon
 and rrffmpeg's own exit are outside it. `duration` is the gap between the
 `started` and `finished` events, so it is the job itself.
+
+The journal also records the kind of work each job is (`probe`, `thumbnail`,
+`trickplay`, `sprite`, `analysis`, `audio`, `transcode`, `remux`) and the input
+path it reads, so the report splits the same figures by kind and by pool:
+
+```text
+kind      trickplay  n=14    dispatch p50 2.04 ms   p95 3.10 ms
+                            duration p50 11.2 s    p95 19.4 s
+kind      thumbnail  n=3     dispatch p50 746 us    p95 812 us
+class     heavy 2  light 91  unknown 512
+size      host uhd630  class heavy  cap 1  n 0  p05 none
+parked    none
+light wait  0 of 91 light jobs waited over 1 s, slowest -
+```
+
+`unknown` is a job from a journal written before the split. `size` is the cap a
+host sized itself to, with the sample count and the 5th percentile behind it.
+`parked` counts the time a throttled stream held a slot without using it.
+`light wait` counts the Light jobs that still waited over a second, so it shows
+a light pool that is too small.
 
 What it does not measure: the delay Jellyfin sees before the first frame, and
 anything on the worker beyond the process lifetime. For the week-long test, run
